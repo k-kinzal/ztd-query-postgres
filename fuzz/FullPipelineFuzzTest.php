@@ -410,7 +410,8 @@ final class FullPipelineFuzzTest extends TestCase
             return null;
         }
 
-        return $m[3] !== '' ? $m[3] : ($m[4] ?? null);
+        $quotedTable = $m[3] ?? '';
+        return $quotedTable !== '' ? $quotedTable : ($m[4] ?? null);
     }
 
     private function quoteIdentifier(string $name): string

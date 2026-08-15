@@ -1301,6 +1301,10 @@ final class PgSqlMutationResolverTest extends TestCase
         $mutation = $resolver->resolve($sql, 'CREATE_TABLE', QueryKind::DDL_SIMULATED);
 
         self::assertInstanceOf(CreateTableAsSelectMutation::class, $mutation);
+        $mutation->apply($shadowStore, []);
+        $definition = $registry->get('archive');
+        self::assertNotNull($definition);
+        self::assertSame(['Id', 'Name'], $definition->columns);
     }
 
     public function testResolveCreateTableAsSelectWithTableQualifiedColumn(): void
