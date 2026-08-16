@@ -28,6 +28,7 @@ use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlMutationResolver::class)]
 #[UsesClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 #[UsesClass(PgSqlSchemaParser::class)]
 final class PgSqlMutationResolverTest extends TestCase
 {

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\PostgreSqlProvider;
 use ZtdQuery\Exception\UnknownSchemaException;
@@ -37,6 +39,8 @@ use ZtdQuery\Shadow\ShadowStore;
  * - INV-L2-05: classify() and rewrite() must agree on QueryKind
  * - Kind correctness per SQL type: SELECT->READ, INSERT/UPDATE/DELETE->WRITE_SIMULATED, DDL->DDL_SIMULATED
  */
+#[CoversNothing]
+#[Large]
 final class RewriteFuzzTest extends TestCase
 {
     private const ITERATIONS = 100;
@@ -76,6 +80,7 @@ final class RewriteFuzzTest extends TestCase
 
         $faker = Factory::create();
         $this->provider = new PostgreSqlProvider($faker);
+        $faker->seed(20260815);
     }
 
     public function testRewriteSelectReturnsReadKind(): void

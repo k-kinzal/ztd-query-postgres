@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\PostgreSqlProvider;
 use ZtdQuery\Platform\Postgres\PgSqlCastRenderer;
@@ -22,6 +24,8 @@ use ZtdQuery\Schema\ColumnTypeFamily;
  * - P-TF-3: With empty table context, SQL is returned unchanged (identity transform)
  * - P-TF-4: Empty-row shadow tables still inject CTE with WHERE FALSE
  */
+#[CoversNothing]
+#[Large]
 final class TransformerFuzzTest extends TestCase
 {
     private const ITERATIONS = 100;
@@ -35,6 +39,7 @@ final class TransformerFuzzTest extends TestCase
         $this->transformer = new SelectTransformer(new PgSqlCastRenderer(), new PgSqlIdentifierQuoter());
         $faker = Factory::create();
         $this->provider = new PostgreSqlProvider($faker);
+        $faker->seed(20260815);
     }
 
     public function testTransformDoesNotCrashOnRandomSelectWithEmptyTables(): void

@@ -1614,4 +1614,18 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         self::assertNotNull($def);
         self::assertSame(['id'], $def->primaryKeys);
     }
+
+    public function testConstraintKeywordPrefixesRemainColumnNames(): void
+    {
+        $parser = new PgSqlSchemaParser();
+        $sql = 'CREATE TABLE bookings (id INT, check_in TEXT, checkout_date TEXT, unique_value TEXT, constraint_name TEXT, foreign_key_id INT, exclude_reason TEXT, "CHECK" TEXT,   PRIMARY KEY (id))';
+        $def = $parser->parse($sql);
+
+        self::assertNotNull($def);
+        self::assertSame(
+            ['id', 'check_in', 'checkout_date', 'unique_value', 'constraint_name', 'foreign_key_id', 'exclude_reason', 'CHECK'],
+            $def->columns,
+        );
+        self::assertSame(['id'], $def->primaryKeys);
+    }
 }

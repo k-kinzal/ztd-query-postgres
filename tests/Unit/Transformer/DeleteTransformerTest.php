@@ -18,6 +18,7 @@ use ZtdQuery\Platform\Postgres\PgSqlIdentifierQuoter;
 
 #[CoversClass(DeleteTransformer::class)]
 #[UsesClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 #[UsesClass(SelectTransformer::class)]
 #[UsesClass(PgSqlCastRenderer::class)]
 #[UsesClass(PgSqlIdentifierQuoter::class)]

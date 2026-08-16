@@ -13,6 +13,7 @@ use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlQueryGuard::class)]
 #[UsesClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 final class PgSqlQueryGuardTest extends QueryClassifierContractTest
 {
     protected function classify(string $sql): ?QueryKind

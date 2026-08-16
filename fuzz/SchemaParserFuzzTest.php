@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\PostgreSqlProvider;
 use ZtdQuery\Platform\Postgres\PgSqlSchemaParser;
@@ -23,6 +25,8 @@ use ZtdQuery\Schema\TableDefinition;
  * - P-SP-6: Non-null result always has non-empty columns
  * - P-SP-7: parse() returns null for non-CREATE TABLE statements
  */
+#[CoversNothing]
+#[Large]
 final class SchemaParserFuzzTest extends TestCase
 {
     private const ITERATIONS = 100;
@@ -36,6 +40,7 @@ final class SchemaParserFuzzTest extends TestCase
         $this->parser = new PgSqlSchemaParser();
         $faker = Factory::create();
         $this->provider = new PostgreSqlProvider($faker);
+        $faker->seed(20260815);
     }
 
     public function testParseDoesNotCrashOnRandomCreateTable(): void

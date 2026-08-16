@@ -21,6 +21,7 @@ use ZtdQuery\Schema\ColumnTypeFamily;
 
 #[CoversClass(PgSqlTransformer::class)]
 #[UsesClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 #[UsesClass(SelectTransformer::class)]
 #[UsesClass(InsertTransformer::class)]
 #[UsesClass(UpdateTransformer::class)]

@@ -6,9 +6,12 @@ namespace Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use ZtdQuery\Platform\Postgres\PgSqlParser;
+use ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlParser::class)]
+#[UsesClass(PostgreSqlLexicalMasker::class)]
 final class PgSqlParserTest extends TestCase
 {
     public function testClassifySelect(): void
@@ -349,6 +352,74 @@ SELECT * FROM users'));
     {
         $parser = new PgSqlParser();
         self::assertSame('SELECT', $parser->classifyStatement('/* comment */ SELECT 1'));
+    }
+
+    public function testExtractSelectTableAfterBlockComment(): void
+    {
+        $parser = new PgSqlParser();
+        self::assertSame(['my_table'], $parser->extractSelectTableNames('SELECT * FROM/* table */my_table'));
+    }
+
+    public function testExtractSelectTableIgnoresKeywordsInsideLineComment(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = "-- SELECT * FROM other_table WHERE DELETE UPDATE INSERT\nSELECT * FROM items ORDER BY id";
+        self::assertSame(['items'], $parser->extractSelectTableNames($sql));
+    }
+
+    public function testExtractUpdateTableAfterNestedBlockComment(): void
+    {
+        $parser = new PgSqlParser();
+        self::assertSame('my_table', $parser->extractUpdateTable('UPDATE/* outer /* inner */ outer */my_table SET value = 1'));
+    }
+
+    public function testExtractDeleteTableAfterBlockComment(): void
+    {
+        $parser = new PgSqlParser();
+        self::assertSame('my_table', $parser->extractDeleteTable('DELETE FROM/* table */my_table WHERE id = 1'));
+    }
+
+    public function testExtractInsertTableAfterBlockComment(): void
+    {
+        $parser = new PgSqlParser();
+        self::assertSame('my_table', $parser->extractInsertTable('INSERT INTO/* table */my_table VALUES (1)'));
+    }
+
+    public function testCommentMarkersInsideQuotedValuesRemainData(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = 'UPDATE users SET note = \'/* not comment */\', payload = $tag$-- not comment$tag$';
+        $sets = $parser->extractUpdateSets($sql);
+        self::assertSame("'/* not comment */'", $sets['note']);
+        self::assertSame('$tag$-- not comment$tag$', $sets['payload']);
+    }
+
+    public function testExtractWhereClauseAfterDoubledQuoteString(): void
+    {
+        $parser = new PgSqlParser();
+        $where = $parser->extractWhereClause("UPDATE test SET body = 'it''s updated' WHERE id = 1");
+        self::assertSame('id = 1', $where);
+    }
+
+    public function testExtractWhereClauseAfterDollarQuotedString(): void
+    {
+        $parser = new PgSqlParser();
+        $where = $parser->extractWhereClause('UPDATE notes SET body = $$reference to notes table$$ WHERE id = 1');
+        self::assertSame('id = 1', $where);
+    }
+
+    public function testExtractWhereClauseAfterTaggedDollarQuotedString(): void
+    {
+        $parser = new PgSqlParser();
+        $where = $parser->extractWhereClause('UPDATE notes SET body = $text$WHERE id = fake$text$ WHERE id = 1');
+        self::assertSame('id = 1', $where);
+    }
+
+    public function testExtractWhereClauseAfterEscapeString(): void
+    {
+        $parser = new PgSqlParser();
+        $where = $parser->extractWhereClause("UPDATE docs SET content = E'line1\\nline2' WHERE id = 1");
+        self::assertSame('id = 1', $where);
     }
 
     public function testClassifyCreateTempTable(): void
@@ -3379,5 +3450,75 @@ SELECT * FROM users'));
         $rows = $parser->extractInsertValues("INSERT INTO t (a, b) VALUES (1, 'x,y')");
         self::assertCount(1, $rows);
         self::assertCount(2, $rows[0]);
+    }
+
+    public function testInsertValuesSourceIgnoresQuotedKeywordIdentifiers(): void
+    {
+        $parser = new PgSqlParser();
+        $tableSelect = "INSERT INTO \"select\" (id, val) VALUES (1, 'table-select')";
+        $tableValues = "INSERT INTO \"values\" (id, val) VALUES (2, 'table-values')";
+        $columnKeywords = "INSERT INTO test (id, \"select\", \"values\") VALUES (3, 'column-select', 'column-values')";
+
+        self::assertFalse($parser->hasInsertSelect($tableSelect));
+        self::assertNull($parser->extractInsertSelectSql($tableSelect));
+        self::assertSame([['1', "'table-select'"]], $parser->extractInsertValues($tableSelect));
+        self::assertFalse($parser->hasInsertSelect($tableValues));
+        self::assertNull($parser->extractInsertSelectSql($tableValues));
+        self::assertSame([['2', "'table-values'"]], $parser->extractInsertValues($tableValues));
+        self::assertFalse($parser->hasInsertSelect($columnKeywords));
+        self::assertNull($parser->extractInsertSelectSql($columnKeywords));
+        self::assertSame([['3', "'column-select'", "'column-values'"]], $parser->extractInsertValues($columnKeywords));
+    }
+
+    public function testInsertSelectSourceStartsAfterQuotedKeywordIdentifiers(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = 'INSERT INTO "select" ("select", "values") SELECT 1, 2';
+
+        self::assertTrue($parser->hasInsertSelect($sql));
+        self::assertSame('SELECT 1, 2', $parser->extractInsertSelectSql($sql));
+    }
+
+    public function testInsertSourceRequiresInsertStatement(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame([], $parser->extractInsertValues('SELECT VALUES (1)'));
+        self::assertSame([], $parser->extractInsertValues('VALUES (1)'));
+        self::assertFalse($parser->hasInsertSelect('VALUES SELECT 1'));
+        self::assertNull($parser->extractInsertSelectSql('VALUES SELECT 1'));
+    }
+
+    public function testInsertSourceHandlesQuotedIdentifierBoundaries(): void
+    {
+        $parser = new PgSqlParser();
+        $escapedIdentifier = 'INSERT INTO "quoted""select" ("values""column") SELECT 1';
+        $unterminatedIdentifier = 'INSERT INTO "unterminated SELECT 1';
+
+        self::assertTrue($parser->hasInsertSelect($escapedIdentifier));
+        self::assertSame('SELECT 1', $parser->extractInsertSelectSql($escapedIdentifier));
+        self::assertFalse($parser->hasInsertSelect($unterminatedIdentifier));
+        self::assertNull($parser->extractInsertSelectSql($unterminatedIdentifier));
+        self::assertSame([], $parser->extractInsertValues($unterminatedIdentifier));
+        self::assertFalse($parser->hasInsertSelect(''));
+    }
+
+    public function testInsertSourceDoesNotUnderflowParenthesisDepth(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = ') INSERT INTO target SELECT 1';
+
+        self::assertTrue($parser->hasInsertSelect($sql));
+        self::assertSame('SELECT 1', $parser->extractInsertSelectSql($sql));
+    }
+
+    public function testInsertSourceIgnoresNestedKeywordBeforeValues(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = 'INSERT INTO target (SELECT ignored) VALUES (1)';
+
+        self::assertFalse($parser->hasInsertSelect($sql));
+        self::assertNull($parser->extractInsertSelectSql($sql));
+        self::assertSame([['1']], $parser->extractInsertValues($sql));
     }
 }

@@ -37,6 +37,7 @@ use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlRewriter::class)]
 #[UsesClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 #[UsesClass(PgSqlSchemaParser::class)]
 #[UsesClass(PgSqlQueryGuard::class)]
 #[UsesClass(PgSqlMutationResolver::class)]
@@ -2900,5 +2901,110 @@ final class PgSqlRewriterTest extends RewriterContractTest
         self::assertStringContainsString('"derived" AS MATERIALIZED', $plan->sql());
         self::assertStringContainsString('"x"', $plan->sql());
         self::assertStringContainsString('"y"', $plan->sql());
+    }
+
+    public function testSelectRewritesTableAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $store = new ShadowStore();
+        $store->set('users', [['id' => 1]]);
+        $rewriter = $this->createRewriter($store, $registry);
+
+        $plan = $rewriter->rewrite('SELECT * FROM/* table */users');
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+        self::assertStringContainsString('"users" AS MATERIALIZED', $plan->sql());
+    }
+
+    public function testSelectIgnoresSqlKeywordsInsideLeadingLineComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $store = new ShadowStore();
+        $store->set('users', [['id' => 1]]);
+        $rewriter = $this->createRewriter($store, $registry);
+        $sql = "-- SELECT * FROM other_table WHERE DELETE UPDATE INSERT\nSELECT * FROM users";
+
+        $plan = $rewriter->rewrite($sql);
+
+        self::assertSame(QueryKind::READ, $plan->kind());
+        self::assertStringContainsString('"users" AS MATERIALIZED', $plan->sql());
+        self::assertStringNotContainsString('"other_table" AS MATERIALIZED', $plan->sql());
+    }
+
+    public function testInsertResolvesTargetAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('INSERT INTO/* table */users (id) VALUES (1)');
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
+        self::assertInstanceOf(InsertMutation::class, $plan->mutation());
+        self::assertSame('users', $plan->mutation()->tableName());
+    }
+
+    public function testUpdateResolvesTargetAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('UPDATE/* table */users SET id = 2 WHERE id = 1');
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
+        self::assertInstanceOf(UpdateMutation::class, $plan->mutation());
+        self::assertSame('users', $plan->mutation()->tableName());
+    }
+
+    public function testDeleteResolvesTargetAfterBlockComment(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('DELETE FROM/* table */users WHERE id = 1');
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
+        self::assertInstanceOf(DeleteMutation::class, $plan->mutation());
+        self::assertSame('users', $plan->mutation()->tableName());
+    }
+
+    public function testUpdatePreservesDoubledQuoteStringBeforeWhere(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('notes', new TableDefinition(['id', 'body'], ['id' => 'INTEGER', 'body' => 'TEXT'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite("UPDATE notes SET body = 'it''s updated' WHERE id = 1");
+
+        self::assertStringContainsString("'it''s updated' AS \"body\"", $plan->sql());
+        self::assertStringContainsString('WHERE id = 1', $plan->sql());
+    }
+
+    public function testUpdatePreservesDollarQuotedStringBeforeWhere(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('notes', new TableDefinition(['id', 'body'], ['id' => 'INTEGER', 'body' => 'TEXT'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite('UPDATE notes SET body = $$reference to notes table$$ WHERE id = 1');
+
+        self::assertStringContainsString('$$reference to notes table$$ AS "body"', $plan->sql());
+        self::assertStringContainsString('WHERE id = 1', $plan->sql());
+    }
+
+    public function testUpdatePreservesEscapeStringBeforeWhere(): void
+    {
+        $registry = new TableDefinitionRegistry();
+        $registry->register('notes', new TableDefinition(['id', 'body'], ['id' => 'INTEGER', 'body' => 'TEXT'], ['id'], [], []));
+        $rewriter = $this->createRewriter(new ShadowStore(), $registry);
+
+        $plan = $rewriter->rewrite("UPDATE notes SET body = E'line1\\nline2' WHERE id = 1");
+
+        self::assertStringContainsString("E'line1\\nline2' AS \"body\"", $plan->sql());
+        self::assertStringContainsString('WHERE id = 1', $plan->sql());
     }
 }

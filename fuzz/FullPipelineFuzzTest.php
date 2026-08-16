@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use PHPUnit\Framework\Attributes\CoversNothing;
+use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\PostgreSqlProvider;
 use ZtdQuery\Exception\UnknownSchemaException;
@@ -40,6 +42,8 @@ use ZtdQuery\Shadow\ShadowStore;
  * - INV-L2-02/03: Plan consistency (mutation presence matches kind)
  * - DDL -> DML pipeline continuity (CREATE TABLE enables subsequent DML)
  */
+#[CoversNothing]
+#[Large]
 final class FullPipelineFuzzTest extends TestCase
 {
     private const ITERATIONS = 50;
@@ -54,6 +58,7 @@ final class FullPipelineFuzzTest extends TestCase
     {
         $this->schemaParser = new PgSqlSchemaParser();
         $this->faker = Factory::create();
+        $this->faker->seed(20260815);
         $this->provider = new PostgreSqlProvider($this->faker);
     }
 
@@ -115,6 +120,7 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenSelectDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $createSql = $this->provider->createTableStatement(50);
             $definition = $this->schemaParser->parse($createSql);
@@ -152,6 +158,7 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenInsertDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $createSql = $this->provider->createTableStatement(50);
             $definition = $this->schemaParser->parse($createSql);
@@ -203,6 +210,7 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenUpdateDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $createSql = $this->provider->createTableStatement(50);
             $definition = $this->schemaParser->parse($createSql);
@@ -252,6 +260,7 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableThenDeleteDoesNotCrash(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $createSql = $this->provider->createTableStatement(50);
             $definition = $this->schemaParser->parse($createSql);
@@ -295,6 +304,7 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testCreateTableRewriteRegistersThenDmlSucceeds(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $createSql = $this->provider->createTableStatement(50);
             $definition = $this->schemaParser->parse($createSql);
@@ -334,6 +344,7 @@ final class FullPipelineFuzzTest extends TestCase
 
     public function testShadowStoreIntegrityAfterMultipleOperations(): void
     {
+        $this->faker->seed(20260815);
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $createSql = $this->provider->createTableStatement(50);
             $definition = $this->schemaParser->parse($createSql);

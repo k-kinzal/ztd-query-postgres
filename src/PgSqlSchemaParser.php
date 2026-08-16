@@ -274,14 +274,17 @@ final class PgSqlSchemaParser implements SchemaParser
 
     private function isConstraintEntry(string $entry): bool
     {
-        $upper = strtoupper(ltrim($entry));
+        $length = strspn($entry, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$');
+        $leadingKeyword = strtoupper(substr($entry, 0, $length));
 
-        return str_starts_with($upper, 'CONSTRAINT ')
-            || str_starts_with($upper, 'PRIMARY KEY')
-            || str_starts_with($upper, 'UNIQUE')
-            || str_starts_with($upper, 'CHECK')
-            || str_starts_with($upper, 'FOREIGN KEY')
-            || str_starts_with($upper, 'EXCLUDE');
+        return in_array($leadingKeyword, [
+            'CONSTRAINT',
+            'PRIMARY',
+            'UNIQUE',
+            'CHECK',
+            'FOREIGN',
+            'EXCLUDE',
+        ], true);
     }
 
     /**
