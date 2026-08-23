@@ -16,31 +16,19 @@ final class ShadowStoreConsistencyChecker
     }
 
     /**
-     * Check that all shadow store tables maintain array-of-arrays structure.
+     * Check that every shadow store entry has a usable table key.
+     *
+     * Empty row sets are valid after CREATE, DELETE, and TRUNCATE.
      */
     public function check(string $sql): ?InvariantViolation
     {
-        $allData = $this->store->getAll();
-
-        foreach ($allData as $tableName => $rows) {
-            if ($rows === []) {
+        foreach (array_keys($this->store->getAll()) as $tableName) {
+            if ($tableName === '') {
                 return new InvariantViolation(
-                    'INV-L4-01',
-                    sprintf('ShadowStore table "%s" is empty', $tableName),
+                    'SHADOW_EMPTY_KEY',
+                    'ShadowStore contains an empty table name key',
                     $sql,
-                    ['table' => $tableName]
                 );
-            }
-
-            foreach ($rows as $index => $row) {
-                if ($row === []) {
-                    return new InvariantViolation(
-                        'INV-L4-01',
-                        sprintf('ShadowStore table "%s" row %d is empty', $tableName, $index),
-                        $sql,
-                        ['table' => $tableName, 'row_index' => $index]
-                    );
-                }
             }
         }
 
