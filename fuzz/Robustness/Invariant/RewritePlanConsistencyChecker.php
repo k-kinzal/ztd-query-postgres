@@ -61,6 +61,19 @@ final class RewritePlanConsistencyChecker implements InvariantChecker
             );
         }
 
+        $shadowTables = ['users', 'orders', 'order_items', 'products'];
+        $relationParser = new \ZtdQuery\Platform\Postgres\PgSqlSelectRelationParser();
+        $normalizedInput = $relationParser->unqualify($sql, $shadowTables);
+        $normalizedPlan = $relationParser->unqualify($plan->sql(), $shadowTables);
+        if ($normalizedInput !== $sql && $normalizedPlan !== $plan->sql()) {
+            return new InvariantViolation(
+                'INV-L2-07',
+                'schema-qualified shadow source survived rewrite',
+                $sql,
+                ['rewrite_sql' => $plan->sql()]
+            );
+        }
+
         return null;
     }
 }

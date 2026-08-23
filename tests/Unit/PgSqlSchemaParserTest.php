@@ -8,11 +8,76 @@ use Tests\Contract\SchemaParserContractTest;
 use ZtdQuery\Platform\Postgres\PgSqlSchemaParser;
 use ZtdQuery\Platform\SchemaParser;
 use ZtdQuery\Schema\ColumnTypeFamily;
+use ZtdQuery\Schema\IdentityGenerationStrategy;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\UsesClass;
+use ZtdQuery\Platform\Postgres\PgSqlPartitionParser;
+use ZtdQuery\Schema\TablePartitionStrategy;
+use ZtdQuery\Sql\SqlToken;
+use ZtdQuery\Sql\SqlTokenKind;
+use ZtdQuery\Sql\SqlTokenStream;
 
 #[CoversClass(PgSqlSchemaParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlColumnTypeMapper::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlForeignKeyDefinitionParser::class)]
+#[UsesClass(PgSqlPartitionParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlLexerProfile::class)]
 final class PgSqlSchemaParserTest extends SchemaParserContractTest
 {
+    public function testQualifiedIdentifierRejectsMismatchedTokenStream(): void
+    {
+        $method = new \ReflectionMethod(PgSqlSchemaParser::class, 'qualifiedIdentifierAt');
+        $stream = SqlTokenStream::tokenize('users', \ZtdQuery\Platform\Postgres\PgSqlLexerProfile::create());
+        $tokens = [new SqlToken(SqlTokenKind::String, 'users', 0, 0, 0)];
+
+        self::assertNull($method->invoke(new PgSqlSchemaParser(), $stream, $tokens, 0));
+    }
+
+    public function testParsesSchemaQualifiedQuotedDomainTypeWithoutChangingItsCase(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE contacts (age "tenant"."PositiveValue" NOT NULL)',
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame('"tenant"."PositiveValue"', $definition->columnTypes['age']);
+        self::assertSame(ColumnTypeFamily::UNKNOWN, $definition->typedColumns['age']->family);
+        self::assertSame('"tenant"."PositiveValue"', $definition->typedColumns['age']->nativeType);
+    }
+
+    public function testParsesQuotedDomainAndDomainArrayTypes(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE contacts (age "PositiveValue", history "tenant"."PositiveValue"[])',
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame('"PositiveValue"', $definition->columnTypes['age']);
+        self::assertSame('"tenant"."PositiveValue"[]', $definition->columnTypes['history']);
+    }
+
+    public function testRejectsIncompleteQualifiedDomainType(): void
+    {
+        self::assertNull((new PgSqlSchemaParser())->parse(
+            'CREATE TABLE contacts (age "tenant". NOT NULL)',
+        ));
+        self::assertNull((new PgSqlSchemaParser())->parse(
+            'CREATE TABLE contacts (age "tenant". not null)',
+        ));
+    }
+
+    public function testQuotedConstraintWordsRemainValidDomainNames(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE contacts (flag "tenant"."NOT", note "NOT NULL")',
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame('"tenant"."NOT"', $definition->columnTypes['flag']);
+        self::assertSame('"NOT NULL"', $definition->columnTypes['note']);
+        self::assertSame([], $definition->notNullColumns);
+    }
+
     protected function createParser(): SchemaParser
     {
         return new PgSqlSchemaParser();
@@ -52,6 +117,39 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         self::assertSame(['id'], $def->primaryKeys);
         self::assertContains('id', $def->notNullColumns);
         self::assertContains('name', $def->notNullColumns);
+    }
+
+    public function testPartitionClauseDoesNotBecomePartOfTableBody(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE logs (id INTEGER, log_date DATE, PRIMARY KEY (id, log_date)) '
+            . 'PARTITION BY RANGE (log_date)',
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['id', 'log_date'], $definition->columns);
+        self::assertSame(['id', 'log_date'], $definition->primaryKeys);
+        $partitionKey = $definition->partitionKey;
+        self::assertNotNull($partitionKey);
+        self::assertSame(TablePartitionStrategy::Range, $partitionKey->strategy);
+        self::assertSame(['log_date'], $partitionKey->expressions);
+    }
+
+    public function testCreateKeywordInsideAnotherStatementDoesNotParse(): void
+    {
+        self::assertNull((new PgSqlSchemaParser())->parse(
+            'SELECT 1 FROM source_table; CREATE TABLE hidden (id INTEGER)',
+        ));
+    }
+
+    public function testIncompleteIfNotExistsAndQualifiedNamesDoNotParse(): void
+    {
+        $parser = new PgSqlSchemaParser();
+
+        self::assertNull($parser->parse('CREATE TABLE IF users (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE IF NOT users (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE IF EXISTS users (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE public. (id INTEGER)'));
     }
 
     public function testParseColumnTypes(): void
@@ -351,6 +449,95 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         self::assertNotNull($def);
         self::assertSame(['id', 'status', 'created_at'], $def->columns);
         self::assertContains('status', $def->notNullColumns);
+        self::assertSame([
+            'status' => "'active'",
+            'created_at' => 'NOW()',
+        ], $def->columnDefaults);
+    }
+
+    public function testParseKeepsConstraintWordsInsideDefaultExpressions(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            "CREATE TABLE t (label TEXT DEFAULT ('not null, still default') NOT NULL, enabled BOOLEAN DEFAULT TRUE)"
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([
+            'label' => "('not null, still default')",
+            'enabled' => 'TRUE',
+        ], $definition->columnDefaults);
+    }
+
+    public function testParseDoesNotTreatSequenceAsOrdinaryDefault(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            "CREATE TABLE t (id BIGINT DEFAULT nextval('t_id_seq'::regclass), name TEXT DEFAULT 'new')"
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame(['name' => "'new'"], $definition->columnDefaults);
+        self::assertSame(['id' => IdentityGenerationStrategy::Sequence], $definition->identityStrategies);
+    }
+
+    public function testParseSerialAndGeneratedIdentityStrategies(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE t (id serial PRIMARY KEY, generated BIGINT generated by default as identity, name TEXT)'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([
+            'id' => IdentityGenerationStrategy::Sequence,
+            'generated' => IdentityGenerationStrategy::Sequence,
+        ], $definition->identityStrategies);
+    }
+
+    public function testParseDetectsParenthesizedUppercaseSequenceDefault(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            "CREATE TABLE t (id BIGINT DEFAULT ((NEXTVAL('t_id_seq'::regclass))), fallback BIGINT DEFAULT coalesce(nextval('fallback_seq'), 1), offset_id BIGINT DEFAULT +nextval('offset_seq'))"
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([
+            'fallback' => "coalesce(nextval('fallback_seq'), 1)",
+            'offset_id' => "+nextval('offset_seq')",
+        ], $definition->columnDefaults);
+        self::assertSame([
+            'id' => IdentityGenerationStrategy::Sequence,
+        ], $definition->identityStrategies);
+    }
+
+    public function testGeneratedStoredColumnIsNotAnIdentity(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE t (source INTEGER, computed INTEGER GENERATED ALWAYS AS (source + 1) STORED)'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([], $definition->identityStrategies);
+        self::assertSame(['computed' => '(source + 1)'], $definition->generatedExpressions);
+    }
+
+    public function testUnprefixedAndIncompleteIdentityClausesAreNotIdentities(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse(
+            'CREATE TABLE t (always_value BIGINT ALWAYS AS IDENTITY, default_value BIGINT BY DEFAULT AS IDENTITY, '
+            . 'incomplete BIGINT GENERATED, unprefixed_computed INTEGER ALWAYS AS (1) STORED)'
+        );
+
+        self::assertNotNull($definition);
+        self::assertSame([], $definition->identityStrategies);
+        self::assertSame([], $definition->generatedExpressions);
+    }
+
+    public function testParseStopsDefaultAtInlinePrimaryKeyConstraint(): void
+    {
+        $definition = (new PgSqlSchemaParser())->parse('CREATE TABLE t (id INTEGER DEFAULT 7 PRIMARY KEY)');
+
+        self::assertNotNull($definition);
+        self::assertSame(['id' => '7'], $definition->columnDefaults);
+        self::assertSame(['id'], $definition->primaryKeys);
     }
 
     public function testParseMultipleUniqueConstraints(): void
@@ -738,6 +925,7 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         $def = $parser->parse('CREATE TABLE t (id INTEGER GENERATED ALWAYS AS IDENTITY)');
         self::assertNotNull($def);
         self::assertSame(['id'], $def->columns);
+        self::assertSame(['id' => IdentityGenerationStrategy::Sequence], $def->identityStrategies);
     }
 
     public function testParseMultiWordTypeNotConflictWithConstraint(): void
@@ -1075,6 +1263,19 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         self::assertSame(['id'], $def->columns);
     }
 
+    public function testRejectsMalformedCreateTablePreambleAndBodyDelimiters(): void
+    {
+        $parser = new PgSqlSchemaParser();
+
+        self::assertNull($parser->parse('CREATE TABLE IF EXISTS t (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE IF WRONG EXISTS t (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE IF NOT MISSING t (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE t [id INTEGER])'));
+        self::assertNull($parser->parse('CREATE TABLE [t] (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE public. (id INTEGER)'));
+        self::assertNull($parser->parse('CREATE TABLE t'));
+    }
+
     public function testParseLowercaseTimestamp(): void
     {
         $parser = new PgSqlSchemaParser();
@@ -1145,6 +1346,7 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         $def = $parser->parse('CREATE TABLE t (s SMALLSERIAL)');
         self::assertNotNull($def);
         self::assertSame(ColumnTypeFamily::INTEGER, $def->typedColumns['s']->family);
+        self::assertSame(['s' => IdentityGenerationStrategy::Sequence], $def->identityStrategies);
     }
 
     public function testParseColumnTypeWithWhitespaceBeforeParams(): void
@@ -1581,6 +1783,9 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         $def = $parser->parse('CREATE TABLE t (id INTEGER, foreign key (id) REFERENCES other(id))');
         self::assertNotNull($def);
         self::assertSame(['id'], $def->columns);
+        self::assertCount(1, $def->foreignKeys);
+        self::assertSame('other', array_values($def->foreignKeys)[0]->referencedTable);
+        self::assertSame(['id'], array_values($def->foreignKeys)[0]->columns);
     }
 
     public function testParseColumnWithDefaultContainingParenthesis(): void
@@ -1589,6 +1794,7 @@ final class PgSqlSchemaParserTest extends SchemaParserContractTest
         $def = $parser->parse("CREATE TABLE t (id INTEGER DEFAULT (nextval('seq')))");
         self::assertNotNull($def);
         self::assertSame(['id'], $def->columns);
+        self::assertSame([], $def->columnDefaults);
     }
 
     public function testParseBitVaryingMultiWordType(): void

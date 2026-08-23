@@ -23,6 +23,9 @@ final class PgSqlQueryGuard
      */
     public function classify(string $sql): ?QueryKind
     {
+        if (PgSqlReadOnlyDiagnosticStatement::isSafe($sql)) {
+            return QueryKind::READ;
+        }
         $type = $this->parser->classifyStatement($sql);
         if ($type === null) {
             return null;
@@ -30,10 +33,10 @@ final class PgSqlQueryGuard
 
         return match ($type) {
             'SELECT' => QueryKind::READ,
-            'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE' => QueryKind::WRITE_SIMULATED,
+            'DO' => QueryKind::READ,
+            'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'TRUNCATE' => QueryKind::WRITE_SIMULATED,
             'CREATE_TABLE', 'DROP_TABLE', 'ALTER_TABLE' => QueryKind::DDL_SIMULATED,
             'TCL' => QueryKind::SKIPPED,
-            default => null,
         };
     }
 }

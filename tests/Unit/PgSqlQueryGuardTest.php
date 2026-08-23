@@ -12,8 +12,10 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlQueryGuard::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlReadOnlyDiagnosticStatement::class)]
 #[UsesClass(PgSqlParser::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlLexerProfile::class)]
 final class PgSqlQueryGuardTest extends QueryClassifierContractTest
 {
     protected function classify(string $sql): ?QueryKind
@@ -75,6 +77,15 @@ final class PgSqlQueryGuardTest extends QueryClassifierContractTest
         self::assertSame(QueryKind::WRITE_SIMULATED, $guard->classify('DELETE FROM users WHERE id = 1'));
     }
 
+    public function testMergeClassifiesAsWriteSimulated(): void
+    {
+        $guard = new PgSqlQueryGuard(new PgSqlParser());
+
+        self::assertSame(QueryKind::WRITE_SIMULATED, $guard->classify(
+            'MERGE INTO users USING source ON users.id = source.id WHEN MATCHED THEN DELETE',
+        ));
+    }
+
     public function testTruncateClassifiesAsWriteSimulated(): void
     {
         $guard = new PgSqlQueryGuard(new PgSqlParser());
@@ -123,6 +134,16 @@ final class PgSqlQueryGuardTest extends QueryClassifierContractTest
         self::assertNull($guard->classify('CREATE DATABASE test'));
     }
 
+    public function testDoBlockClassifiesAsPassthroughRead(): void
+    {
+        $guard = new PgSqlQueryGuard(new PgSqlParser());
+
+        self::assertSame(
+            QueryKind::READ,
+            $guard->classify("DO \$\$ BEGIN INSERT INTO users VALUES (1); END \$\$"),
+        );
+    }
+
     public function testWithSelectClassifiesAsRead(): void
     {
         $guard = new PgSqlQueryGuard(new PgSqlParser());
@@ -165,10 +186,10 @@ final class PgSqlQueryGuardTest extends QueryClassifierContractTest
         self::assertNull($guard->classify('SET search_path TO public'));
     }
 
-    public function testShowCommandReturnsNull(): void
+    public function testShowCommandClassifiesAsRead(): void
     {
         $guard = new PgSqlQueryGuard(new PgSqlParser());
-        self::assertNull($guard->classify('SHOW server_version'));
+        self::assertSame(QueryKind::READ, $guard->classify('SHOW server_version'));
     }
 
     public function testSavepointClassifiesAsSkipped(): void
@@ -191,10 +212,13 @@ final class PgSqlQueryGuardTest extends QueryClassifierContractTest
         self::assertNotSame(QueryKind::SKIPPED, $result);
     }
 
-    public function testClassifyReturnsNullForGarbageInput(): void
+    public function testClassifiesSafeExplainAndRejectsExecutingWrite(): void
     {
         $guard = new PgSqlQueryGuard(new PgSqlParser());
-        self::assertNull($guard->classify('EXPLAIN SELECT 1'));
+        self::assertSame(QueryKind::READ, $guard->classify('EXPLAIN SELECT 1'));
+        self::assertSame(QueryKind::READ, $guard->classify('EXPLAIN UPDATE users SET active = FALSE'));
+        self::assertSame(QueryKind::READ, $guard->classify('EXPLAIN (ANALYZE TRUE, FORMAT JSON) SELECT 1'));
+        self::assertNull($guard->classify('EXPLAIN ANALYZE UPDATE users SET active = FALSE'));
     }
 
     public function testClassifySelectLowercaseIsRead(): void

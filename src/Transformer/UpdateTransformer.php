@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace ZtdQuery\Platform\Postgres\Transformer;
 
 use ZtdQuery\Exception\UnsupportedSqlException;
+use ZtdQuery\Platform\Postgres\PgSqlCteShadowComposer;
 use ZtdQuery\Platform\Postgres\PgSqlParser;
 use ZtdQuery\Rewrite\SqlTransformer;
+use ZtdQuery\Shadow\Mutation\MutationRowIdentity;
 
 /**
  * Transforms UPDATE statements into SELECT projections with CTE shadowing.
@@ -19,11 +21,15 @@ final class UpdateTransformer implements SqlTransformer
 {
     private PgSqlParser $parser;
     private SelectTransformer $selectTransformer;
+    private PgSqlCteShadowComposer $cteComposer;
 
-    public function __construct(PgSqlParser $parser, SelectTransformer $selectTransformer)
-    {
+    public function __construct(
+        PgSqlParser $parser,
+        SelectTransformer $selectTransformer,
+    ) {
         $this->parser = $parser;
         $this->selectTransformer = $selectTransformer;
+        $this->cteComposer = new PgSqlCteShadowComposer();
     }
 
     /**
@@ -37,19 +43,32 @@ final class UpdateTransformer implements SqlTransformer
         }
 
         $columns = $tables[$targetTable]['columns'] ?? [];
-        $projection = $this->buildProjection($sql, $targetTable, $columns);
+        $projection = $this->buildProjection(
+            $sql,
+            $targetTable,
+            $columns,
+            $tables[$targetTable]['primaryKeys'] ?? [],
+        );
 
-        return $this->selectTransformer->transform($projection['sql'], $tables);
+        return $this->selectTransformer->transform(
+            $this->cteComposer->carryPrefix($sql, $projection['sql']),
+            $tables,
+        );
     }
 
     /**
      * Build a result-select SQL from an UPDATE statement.
      *
      * @param array<int, string> $columns
+     * @param array<int, string> $primaryKeys
      * @return array{sql: string, table: string, tables: array<string, array{alias: string}>}
      */
-    public function buildProjection(string $sql, string $targetTable, array $columns): array
-    {
+    public function buildProjection(
+        string $sql,
+        string $targetTable,
+        array $columns,
+        array $primaryKeys = [],
+    ): array {
         $alias = $this->parser->extractUpdateAlias($sql);
         $qualifier = $alias ?? $targetTable;
 
@@ -67,6 +86,11 @@ final class UpdateTransformer implements SqlTransformer
             if (!isset($coveredCols[$col])) {
                 $selectCols[] = "\"$qualifier\".\"$col\"";
             }
+        }
+
+        $identity = new MutationRowIdentity();
+        foreach ($primaryKeys as $primaryKey) {
+            $selectCols[] = '"' . $qualifier . '"."' . $primaryKey . '" AS "' . $identity->column($primaryKey) . '"';
         }
 
         if ($selectCols === []) {

@@ -60,6 +60,15 @@ final class ClassifyTarget
             fn (): string => $this->provider->createTableStatement(maxDepth: 5),
             fn (): string => $this->provider->alterTableStatement(maxDepth: 5),
             fn (): string => $this->provider->dropTableStatement(maxDepth: 3),
+            fn (): string => $this->provider->partitionOfStatement(),
+            fn (): string => $this->provider->tableSampleStatement(),
+            fn (): string => $this->provider->doStatement(),
+            fn (): string => $this->provider->mergeStatement(),
+            fn (): string => $this->provider->copyStatement(maxDepth: 8),
+            fn (): string => $this->provider->partialIndexUpsertStatement(),
+            fn (): string => $this->provider->createDomainStatement(maxDepth: 8),
+            fn (): string => $this->provider->domainDmlStatement(),
+            fn (): string => $this->provider->fullTextSearchStatement(),
         ];
 
         $index = ord($input[0] ?? "\0") % count($generators);

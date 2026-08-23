@@ -6,14 +6,57 @@ namespace Tests\Unit;
 
 use PHPUnit\Framework\TestCase;
 use ZtdQuery\Platform\Postgres\PgSqlParser;
+use ZtdQuery\Platform\Postgres\PgSqlConflictTarget;
 use ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlSelectRelationParser::class)]
 #[UsesClass(PostgreSqlLexicalMasker::class)]
+#[UsesClass(PgSqlConflictTarget::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlLexerProfile::class)]
 final class PgSqlParserTest extends TestCase
 {
+    public function testClassifiesAnonymousDoBlockWithoutSplittingItsBody(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = "DO \$body\$ BEGIN INSERT INTO users VALUES (1); UPDATE users SET id = 2; END \$body\$";
+
+        self::assertSame('DO', $parser->classifyStatement($sql));
+        self::assertSame([$sql], $parser->splitStatements($sql));
+        self::assertSame('DO', $parser->classifyStatement('do language plpgsql $$ begin null; end $$'));
+        self::assertNull($parser->classifyStatement('DOUBLE PRECISION'));
+        self::assertNull($parser->classifyStatement('INVALID DO $$ BEGIN NULL; END $$'));
+    }
+
+    public function testExtractsOnConflictUpdateWhereAfterInsertSelectWhere(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = 'INSERT INTO items SELECT * FROM source WHERE active ON CONFLICT (id) DO UPDATE SET score = EXCLUDED.score WHERE items.score >= 80 RETURNING id';
+
+        self::assertSame('items.score >= 80', $parser->extractOnConflictUpdateWhere($sql));
+    }
+
+    public function testReturnsNullWithoutOnConflictUpdateWhere(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertNull($parser->extractOnConflictUpdateWhere(
+            'INSERT INTO items VALUES (1, 90) ON CONFLICT (id) DO UPDATE SET score = EXCLUDED.score',
+        ));
+    }
+
+    public function testRequiresCompleteDoUpdateSetAnchor(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertNull($parser->extractOnConflictUpdateWhere(
+            'INSERT INTO items VALUES (1, 90) ON CONFLICT (id) UPDATE SET score = excluded.score WHERE items.score >= 80',
+        ));
+    }
+
     public function testClassifySelect(): void
     {
         $parser = new PgSqlParser();
@@ -36,6 +79,25 @@ final class PgSqlParserTest extends TestCase
     {
         $parser = new PgSqlParser();
         self::assertSame('DELETE', $parser->classifyStatement('DELETE FROM users WHERE id = 1'));
+    }
+
+    public function testClassifiesMergeWithAndWithoutCtePrefix(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame('MERGE', $parser->classifyStatement(
+            'MERGE INTO users USING source ON users.id = source.id WHEN MATCHED THEN DELETE',
+        ));
+        self::assertSame('MERGE', $parser->classifyStatement(
+            'WITH source AS (SELECT 1 AS id) '
+            . 'MERGE INTO users USING source ON users.id = source.id WHEN MATCHED THEN DELETE',
+        ));
+        self::assertSame('MERGE', $parser->classifyStatement(
+            'merge into users using source on users.id = source.id when matched then delete',
+        ));
+        self::assertSame('SELECT', $parser->classifyStatement('SELECT 1 AS merge_marker'));
+        self::assertNull($parser->classifyStatement('INVALID MERGE'));
+        self::assertNull($parser->classifyStatement('WITH source AS (SELECT 1) INVALID'));
     }
 
     public function testClassifyTruncate(): void
@@ -235,6 +297,39 @@ SELECT * FROM users'));
     {
         $parser = new PgSqlParser();
         self::assertSame('users', $parser->extractTruncateTable('TRUNCATE TABLE users CASCADE'));
+    }
+
+    public function testExtractTruncateTablesPreservesEveryTarget(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame(
+            ['Alpha', 'beta', 'gamma'],
+            $parser->extractTruncateTables(
+                'TRUNCATE TABLE ONLY public."Alpha" *, /* next */ ONLY beta, gamma RESTART IDENTITY CASCADE',
+            ),
+        );
+    }
+
+    public function testExtractTruncateTablesSupportsUnicodeQuotedIdentifiers(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame(
+            ['select', 'second', 'third'],
+            $parser->extractTruncateTables('TRUNCATE TABLE U&"select", public.U&"second", "third"'),
+        );
+    }
+
+    public function testExtractTruncateTablesRejectsNonTruncateAndIncompleteTargets(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame([], $parser->extractTruncateTables('SELECT users'));
+        self::assertSame([], $parser->extractTruncateTables('TRUNCATE TABLE'));
+        self::assertSame(['u'], $parser->extractTruncateTables('TRUNCATE u'));
+        self::assertSame([], $parser->extractTruncateTables('TRUNCATE TABLE U&'));
+        self::assertSame([], $parser->extractTruncateTables('TRUNCATE TABLE U&users'));
     }
 
     public function testExtractCreateTableName(): void
@@ -594,6 +689,29 @@ SELECT * FROM users'));
         );
         self::assertSame(['v'], $result['columns']);
         self::assertSame('EXCLUDED.v', $result['values']['v']);
+    }
+
+    public function testExtractOnConflictStopsBeforeReturningWithoutWhere(): void
+    {
+        $parser = new PgSqlParser();
+        $result = $parser->extractOnConflictUpdateColumns(
+            "INSERT INTO t (id, v) VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET v = EXCLUDED.v RETURNING id"
+        );
+
+        self::assertSame(['v'], $result['columns']);
+        self::assertSame('EXCLUDED.v', $result['values']['v']);
+    }
+
+    public function testExtractOnConflictRejectsNonUpdateActionContainingSet(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame(
+            ['columns' => [], 'values' => []],
+            $parser->extractOnConflictUpdateColumns(
+                'INSERT INTO t (id, v) VALUES (1, 2) ON CONFLICT (id) DO NOTHING SET v = EXCLUDED.v'
+            ),
+        );
     }
 
     public function testExtractOnConflictQuotedColumn(): void
@@ -3382,6 +3500,16 @@ SELECT * FROM users'));
         self::assertSame('5', $rows[0][1]);
     }
 
+    public function testExtractInsertValuesKeepsArrayConstructorTogether(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame(
+            [['1', 'ARRAY[90,85,92]', 'NULL']],
+            $parser->extractInsertValues('INSERT INTO scores (id, values, payload) VALUES (1, ARRAY[90,85,92], NULL)'),
+        );
+    }
+
     public function testHasInsertSelectWithSubqueryInValues(): void
     {
         $parser = new PgSqlParser();
@@ -3520,5 +3648,115 @@ SELECT * FROM users'));
         self::assertFalse($parser->hasInsertSelect($sql));
         self::assertNull($parser->extractInsertSelectSql($sql));
         self::assertSame([['1']], $parser->extractInsertValues($sql));
+    }
+
+    public function testInsertValuesDoesNotUnderflowArrayBracketDepth(): void
+    {
+        $parser = new PgSqlParser();
+
+        self::assertSame(
+            [['1]', '2']],
+            $parser->extractInsertValues('INSERT INTO target (a, b) VALUES (1], 2)'),
+        );
+    }
+
+    public function testUpdateClausesIgnoreKeywordsInsideExpressionsAndSubqueries(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = "UPDATE products SET name = TRIM(BOTH 'x' FROM name), price = CAST(raw AS NUMERIC(10,2)), maximum = (SELECT MAX(price) FROM products p2 WHERE p2.category_id = products.category_id) FROM categories c WHERE products.category_id = c.id RETURNING *";
+
+        self::assertSame([
+            'name' => "TRIM(BOTH 'x' FROM name)",
+            'price' => 'CAST(raw AS NUMERIC(10,2))',
+            'maximum' => '(SELECT MAX(price) FROM products p2 WHERE p2.category_id = products.category_id)',
+        ], $parser->extractUpdateSets($sql));
+        self::assertSame('categories c', $parser->extractUpdateFromClause($sql));
+        self::assertSame('products.category_id = c.id', $parser->extractWhereClause($sql));
+    }
+
+    public function testConflictAssignmentsIgnoreNestedWhereAndReturningKeywords(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = 'INSERT INTO target (id, value) VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET value = (SELECT value FROM source WHERE source.id = excluded.id), meta = jsonb_build_object(\'returning\', excluded.value) WHERE target.active RETURNING *';
+
+        self::assertSame([
+            'columns' => ['value', 'meta'],
+            'values' => [
+                'value' => '(SELECT value FROM source WHERE source.id = excluded.id)',
+                'meta' => "jsonb_build_object('returning', excluded.value)",
+            ],
+        ], $parser->extractOnConflictUpdateColumns($sql));
+    }
+
+    public function testSelectTablesIgnoreFromKeywordInsideExtract(): void
+    {
+        $parser = new PgSqlParser();
+        $sql = 'SELECT EXTRACT(YEAR FROM event_date) FROM events WHERE id IN (SELECT event_id FROM archived_events)';
+
+        self::assertSame(['events', 'archived_events'], $parser->extractSelectTableNames($sql));
+    }
+
+    public function testExtractsPartialConflictTargetStructurally(): void
+    {
+        $target = (new PgSqlParser())->extractOnConflictTarget(
+            "INSERT INTO users (email, status) VALUES ('a@example.com', 'active') "
+            . "ON CONFLICT (email, tenant_id) WHERE status = 'active' "
+            . 'DO UPDATE SET status = EXCLUDED.status',
+        );
+
+        self::assertInstanceOf(PgSqlConflictTarget::class, $target);
+        self::assertTrue($target->specified);
+        self::assertSame(['email', 'tenant_id'], $target->columns);
+        self::assertSame("status = 'active'", $target->predicate);
+        self::assertNull($target->constraint);
+    }
+
+    public function testExtractsNamedAndUnspecifiedConflictTargets(): void
+    {
+        $parser = new PgSqlParser();
+        $named = $parser->extractOnConflictTarget(
+            'INSERT INTO users VALUES (1) ON CONFLICT ON CONSTRAINT "Users_Email" DO NOTHING',
+        );
+        $unspecified = $parser->extractOnConflictTarget(
+            'INSERT INTO users VALUES (1) ON CONFLICT DO NOTHING',
+        );
+
+        self::assertInstanceOf(PgSqlConflictTarget::class, $named);
+        self::assertTrue($named->specified);
+        self::assertSame('Users_Email', $named->constraint);
+        self::assertInstanceOf(PgSqlConflictTarget::class, $unspecified);
+        self::assertFalse($unspecified->specified);
+        self::assertNull($parser->extractOnConflictTarget('INSERT INTO users VALUES (1)'));
+    }
+
+    public function testConflictTargetSkipsNestedAnchorsAndStopsAtTheActionBoundary(): void
+    {
+        $target = (new PgSqlParser())->extractOnConflictTarget(
+            "INSERT INTO users VALUES ((on conflict)) ON CONFLICT (email)"
+                . " WHERE coalesce((status = 'active'), false)"
+                . ' DO UPDATE SET do = lower(EXCLUDED.email)',
+        );
+
+        self::assertInstanceOf(PgSqlConflictTarget::class, $target);
+        self::assertSame(['email'], $target->columns);
+        self::assertSame("coalesce((status = 'active'), false)", $target->predicate);
+    }
+
+    #[TestWith(['INSERT INTO users VALUES (1) ON'], 'trailing ON')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT'], 'missing target')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT ON'], 'missing constraint keyword')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT ON INVALID users_email DO NOTHING'], 'invalid constraint keyword')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT ON CONSTRAINT'], 'missing constraint name')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT ON CONSTRAINT 123 DO NOTHING'], 'invalid constraint name')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT email DO NOTHING'], 'target without parentheses')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT email) DO NOTHING'], 'target word before closing parenthesis')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT [email] DO NOTHING'], 'invalid opening symbol')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT (email DO NOTHING'], 'unclosed target')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT (email + tenant_id) DO NOTHING'], 'non-identifier target')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT (email)'], 'missing action')]
+    #[TestWith(['INSERT INTO users VALUES (1) ON CONFLICT (email) WHERE DO UPDATE SET email = EXCLUDED.email'], 'empty predicate')]
+    public function testRejectsMalformedConflictTargets(string $sql): void
+    {
+        self::assertNull((new PgSqlParser())->extractOnConflictTarget($sql));
     }
 }

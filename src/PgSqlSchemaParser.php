@@ -5,15 +5,17 @@ declare(strict_types=1);
 namespace ZtdQuery\Platform\Postgres;
 
 use ZtdQuery\Schema\ColumnType;
-use ZtdQuery\Schema\ColumnTypeFamily;
+use ZtdQuery\Schema\IdentityGenerationStrategy;
 use ZtdQuery\Platform\SchemaParser;
 use ZtdQuery\Schema\TableDefinition;
+use ZtdQuery\Sql\SqlToken;
+use ZtdQuery\Sql\SqlTokenKind;
+use ZtdQuery\Sql\SqlTokenStream;
 
 /**
  * PostgreSQL implementation of SchemaParser.
  *
- * Parses CREATE TABLE statements using regex-based approach
- * to extract column definitions, types, constraints, and keys.
+ * Parses CREATE TABLE statements into structured schema metadata.
  */
 final class PgSqlSchemaParser implements SchemaParser
 {
@@ -22,21 +24,24 @@ final class PgSqlSchemaParser implements SchemaParser
      */
     public function parse(string $createTableSql): ?TableDefinition
     {
-        if (preg_match('/^\s*CREATE\s+(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)\s*\((.+)\)/is', $createTableSql, $m) !== 1) {
+        $body = $this->tableBody($createTableSql);
+        if ($body === null) {
             return null;
         }
-
-        $body = $m[1];
 
         $columns = [];
         $columnTypes = [];
         /** @var array<string, ColumnType> $typedColumns */
         $typedColumns = [];
+        $columnDefaults = [];
+        $identityStrategies = [];
+        $generatedExpressions = [];
         $primaryKeys = [];
         $notNullColumns = [];
         /** @var array<string, list<string>> $uniqueConstraints */
         $uniqueConstraints = [];
         $uniqueIndex = 0;
+        $foreignKeys = (new PgSqlForeignKeyDefinitionParser())->parseCreateTable($createTableSql);
 
         $entries = $this->splitTableBody($body);
 
@@ -75,6 +80,16 @@ final class PgSqlSchemaParser implements SchemaParser
                 $keyName = $columnDef['name'] . '_UNIQUE';
                 $uniqueConstraints[$keyName] = [$columnDef['name']];
             }
+
+            if ($columnDef['default'] !== null && !self::isSequenceDefault($columnDef['default'])) {
+                $columnDefaults[$columnDef['name']] = $columnDef['default'];
+            }
+            if ($columnDef['identity']) {
+                $identityStrategies[$columnDef['name']] = IdentityGenerationStrategy::Sequence;
+            }
+            if ($columnDef['generatedExpression'] !== null) {
+                $generatedExpressions[$columnDef['name']] = $columnDef['generatedExpression'];
+            }
         }
 
         if ($columns === []) {
@@ -96,11 +111,122 @@ final class PgSqlSchemaParser implements SchemaParser
             $notNullColumns,
             $uniqueConstraints,
             $typedColumns,
+            $columnDefaults,
+            $identityStrategies,
+            $generatedExpressions,
+            $foreignKeys,
+            partitionKey: (new PgSqlPartitionParser())->parseKey($createTableSql),
         );
     }
 
+    private function tableBody(string $sql): ?string
+    {
+        $stream = SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create());
+        $tokens = $stream->significantTokens();
+        $create = $tokens[0] ?? null;
+        if (!$create instanceof SqlToken || !$create->isKeyword('CREATE')) {
+            return null;
+        }
+
+        $tableIndex = null;
+        foreach ($tokens as $index => $token) {
+            if ($token->isTopLevel() && $token->isKeyword('TABLE')) {
+                $tableIndex = $index;
+            }
+        }
+        if ($tableIndex === null) {
+            return null;
+        }
+
+        $index = $tableIndex + 1;
+        $candidate = $tokens[$index] ?? null;
+        if (!$candidate instanceof SqlToken) {
+            return null;
+        }
+        if ($candidate->isKeyword('IF')) {
+            $not = $tokens[$index + 1] ?? null;
+            $exists = $tokens[$index + 2] ?? null;
+            if (!$not instanceof SqlToken || !$not->isKeyword('NOT')) {
+                return null;
+            }
+            if (!$exists instanceof SqlToken || !$exists->isKeyword('EXISTS')) {
+                return null;
+            }
+            $index += 3;
+        }
+        $identifier = $this->qualifiedIdentifierAt($stream, $tokens, $index);
+        if ($identifier === null) {
+            return null;
+        }
+
+        $open = $tokens[$identifier['next']] ?? null;
+        if (!$open instanceof SqlToken) {
+            return null;
+        }
+        if (!$this->isSymbol($open, '(')) {
+            return null;
+        }
+
+        foreach ($tokens as $token) {
+            if ($this->isSymbol($token, ')') && $token->depth === $open->depth) {
+                return substr($sql, $open->endOffset(), $token->offset - $open->endOffset());
+            }
+        }
+
+        return null;
+    }
+
     /**
-     * @return array{name: string, type: string, columnType: ColumnType, notNull: bool, primaryKey: bool, unique: bool}|null
+     * @param list<SqlToken> $tokens
+     * @return array{name: string, next: int}|null
+     */
+    private function qualifiedIdentifierAt(SqlTokenStream $stream, array $tokens, int $index): ?array
+    {
+        $token = $tokens[$index] ?? null;
+        if (!$token instanceof SqlToken) {
+            return null;
+        }
+        if (!in_array($token->kind, [SqlTokenKind::Word, SqlTokenKind::QuotedIdentifier], true)) {
+            return null;
+        }
+        $identifier = $stream->identifierAt($index);
+        if ($identifier === null) {
+            return null;
+        }
+
+        $dot = $tokens[$identifier['next']] ?? null;
+        while ($dot instanceof SqlToken && $this->isSymbol($dot, '.')) {
+            $component = $this->qualifiedIdentifierAt($stream, $tokens, $identifier['next'] + 1);
+            if ($component === null) {
+                return null;
+            }
+            $identifier = $component;
+            $dot = $tokens[$identifier['next']] ?? null;
+        }
+
+        return $identifier;
+    }
+
+    private function isSymbol(SqlToken $token, string $symbol): bool
+    {
+        return $token->kind === SqlTokenKind::Symbol && $token->text === $symbol;
+    }
+
+    private static function isSequenceDefault(string $expression): bool
+    {
+        foreach (SqlTokenStream::tokenize($expression, PgSqlLexerProfile::create())->significantTokens() as $token) {
+            if ($token->text === '(') {
+                continue;
+            }
+
+            return $token->isKeyword('NEXTVAL');
+        }
+
+        return false;
+    }
+
+    /**
+     * @return array{name: string, type: string, columnType: ColumnType, notNull: bool, primaryKey: bool, unique: bool, default: string|null, identity: bool, generatedExpression: string|null}|null
      */
     private function parseColumnDefinition(string $entry): ?array
     {
@@ -122,18 +248,75 @@ final class PgSqlSchemaParser implements SchemaParser
         $notNull = preg_match('/\bNOT\s+NULL\b/i', $afterType) === 1;
         $primaryKey = preg_match('/\bPRIMARY\s+KEY\b/i', $afterType) === 1;
         $unique = preg_match('/\bUNIQUE\b/i', $afterType) === 1;
+        $default = SqlTokenStream::tokenize($afterType, PgSqlLexerProfile::create())->topLevelClause(
+            ['DEFAULT'],
+            [
+                ['NOT', 'NULL'], ['PRIMARY', 'KEY'], ['UNIQUE'], ['CHECK'],
+                ['REFERENCES'], ['COLLATE'], ['CONSTRAINT'], ['GENERATED'], ['DEFERRABLE'],
+            ],
+        );
+        $identity = self::isSerialType($nativeType)
+            || ($default !== null && self::isSequenceDefault($default))
+            || self::hasGeneratedIdentity($afterType);
+        $generatedExpression = null;
+        if (!$identity) {
+            $generatedExpression = SqlTokenStream::tokenize($afterType, PgSqlLexerProfile::create())->topLevelClause(
+                ['GENERATED', 'ALWAYS', 'AS'],
+                [['STORED']],
+            );
+            if ($generatedExpression === '') {
+                $generatedExpression = null;
+            }
+        }
 
-        $family = $this->mapTypeToFamily($nativeType);
-        $columnType = new ColumnType($family, strtoupper($nativeType));
+        $normalizedType = str_contains($nativeType, '"') ? $nativeType : strtoupper($nativeType);
+        $columnType = (new PgSqlColumnTypeMapper())->map($normalizedType);
 
         return [
             'name' => $name,
-            'type' => strtoupper($nativeType),
+            'type' => $normalizedType,
             'columnType' => $columnType,
             'notNull' => $notNull,
             'primaryKey' => $primaryKey,
             'unique' => $unique,
+            'default' => $default,
+            'identity' => $identity,
+            'generatedExpression' => $generatedExpression,
         ];
+    }
+
+    private static function isSerialType(string $nativeType): bool
+    {
+        foreach (['SMALLSERIAL', 'SERIAL', 'BIGSERIAL'] as $serialType) {
+            if (strcasecmp($nativeType, $serialType) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function hasGeneratedIdentity(string $constraints): bool
+    {
+        $tokens = SqlTokenStream::tokenize($constraints, PgSqlLexerProfile::create())->significantTokens();
+        $sequences = [
+            ['GENERATED', 'ALWAYS', 'AS', 'IDENTITY'],
+            ['GENERATED', 'BY', 'DEFAULT', 'AS', 'IDENTITY'],
+        ];
+        foreach ($tokens as $index => $token) {
+            foreach ($sequences as $sequence) {
+                foreach ($sequence as $relative => $keyword) {
+                    $candidate = $tokens[$index + $relative] ?? null;
+                    if ($candidate === null || !$candidate->isTopLevel() || !$candidate->isKeyword($keyword)) {
+                        continue 2;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -160,6 +343,11 @@ final class PgSqlSchemaParser implements SchemaParser
     private function extractType(string $str): ?array
     {
         $str = ltrim($str);
+
+        $quotedType = $this->extractQuotedType($str);
+        if ($quotedType !== null) {
+            return $quotedType;
+        }
 
         if (preg_match('/^([a-zA-Z_]\w*)/i', $str, $m) !== 1) {
             return null;
@@ -204,43 +392,61 @@ final class PgSqlSchemaParser implements SchemaParser
         return ['type' => $fullType, 'rest' => trim($trimmedRest)];
     }
 
-    private function mapTypeToFamily(string $nativeType): ColumnTypeFamily
+    /** @return array{type: string, rest: string}|null */
+    private function extractQuotedType(string $str): ?array
     {
-        $upper = strtoupper(preg_replace('/\(.*\)/', '', $nativeType) ?? $nativeType);
-        $upper = trim($upper);
-
-        $upper = preg_replace('/\[\s*\]/', '', $upper) ?? $upper;
-        $upper = trim($upper);
-
-        return match ($upper) {
-            'INT', 'INT2', 'INT4', 'INT8',
-            'INTEGER', 'SMALLINT', 'BIGINT',
-            'SERIAL', 'SMALLSERIAL', 'BIGSERIAL' => ColumnTypeFamily::INTEGER,
-            'REAL', 'FLOAT4' => ColumnTypeFamily::FLOAT,
-            'DOUBLE PRECISION', 'FLOAT8' => ColumnTypeFamily::DOUBLE,
-            'DECIMAL', 'NUMERIC' => ColumnTypeFamily::DECIMAL,
-            'CHAR', 'CHARACTER', 'VARCHAR', 'CHARACTER VARYING',
-            'TEXT', 'CITEXT', 'NAME' => $this->mapStringType($upper),
-            'BOOLEAN', 'BOOL' => ColumnTypeFamily::BOOLEAN,
-            'DATE' => ColumnTypeFamily::DATE,
-            'TIME', 'TIMETZ', 'TIME WITH TIME ZONE',
-            'TIME WITHOUT TIME ZONE' => ColumnTypeFamily::TIME,
-            'TIMESTAMP', 'TIMESTAMPTZ',
-            'TIMESTAMP WITH TIME ZONE',
-            'TIMESTAMP WITHOUT TIME ZONE' => ColumnTypeFamily::TIMESTAMP,
-            'BYTEA' => ColumnTypeFamily::BINARY,
-            'JSON', 'JSONB' => ColumnTypeFamily::JSON,
-            default => ColumnTypeFamily::UNKNOWN,
-        };
-    }
-
-    private function mapStringType(string $upper): ColumnTypeFamily
-    {
-        if ($upper === 'TEXT' || $upper === 'CITEXT') {
-            return ColumnTypeFamily::TEXT;
+        $tokens = SqlTokenStream::tokenize($str, PgSqlLexerProfile::create())->significantTokens();
+        $first = $tokens[0] ?? null;
+        if ($first === null) {
+            return null;
+        }
+        if ($first->kind !== SqlTokenKind::QuotedIdentifier) {
+            return null;
         }
 
-        return ColumnTypeFamily::STRING;
+        $last = $first;
+        $index = 1;
+        $separator = $tokens[$index] ?? null;
+        if ($separator !== null && $separator->text === '.') {
+            $index++;
+            $qualifiedName = $tokens[$index] ?? null;
+            if ($qualifiedName === null) {
+                return null;
+            }
+            if (!self::isTypeIdentifier($qualifiedName)) {
+                return null;
+            }
+            if ($qualifiedName->kind === SqlTokenKind::Word) {
+                if (in_array(strtoupper($qualifiedName->text), self::CONSTRAINT_KEYWORDS, true)) {
+                    return null;
+                }
+            }
+            $last = $qualifiedName;
+            $index++;
+        }
+
+        while (isset($tokens[$index]) && $tokens[$index]->text === '[') {
+            $index++;
+            $arrayClosing = $tokens[$index] ?? null;
+            if ($arrayClosing === null) {
+                return null;
+            }
+            if ($arrayClosing->text !== ']') {
+                return null;
+            }
+            $last = $arrayClosing;
+            $index++;
+        }
+
+        return [
+            'type' => substr($str, 0, $last->endOffset()),
+            'rest' => substr($str, $last->endOffset()),
+        ];
+    }
+
+    private static function isTypeIdentifier(SqlToken $token): bool
+    {
+        return in_array($token->kind, [SqlTokenKind::Word, SqlTokenKind::QuotedIdentifier], true);
     }
 
     /**

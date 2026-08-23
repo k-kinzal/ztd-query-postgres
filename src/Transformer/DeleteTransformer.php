@@ -6,6 +6,7 @@ namespace ZtdQuery\Platform\Postgres\Transformer;
 
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Postgres\PgSqlParser;
+use ZtdQuery\Platform\Postgres\PgSqlCteShadowComposer;
 use ZtdQuery\Rewrite\SqlTransformer;
 
 /**
@@ -19,11 +20,15 @@ final class DeleteTransformer implements SqlTransformer
 {
     private PgSqlParser $parser;
     private SelectTransformer $selectTransformer;
+    private PgSqlCteShadowComposer $cteComposer;
 
-    public function __construct(PgSqlParser $parser, SelectTransformer $selectTransformer)
-    {
+    public function __construct(
+        PgSqlParser $parser,
+        SelectTransformer $selectTransformer,
+    ) {
         $this->parser = $parser;
         $this->selectTransformer = $selectTransformer;
+        $this->cteComposer = new PgSqlCteShadowComposer();
     }
 
     /**
@@ -39,7 +44,10 @@ final class DeleteTransformer implements SqlTransformer
         $columns = $tables[$targetTable]['columns'] ?? [];
         $projection = $this->buildProjection($sql, $targetTable, $columns);
 
-        return $this->selectTransformer->transform($projection['sql'], $tables);
+        return $this->selectTransformer->transform(
+            $this->cteComposer->carryPrefix($sql, $projection['sql']),
+            $tables,
+        );
     }
 
     /**

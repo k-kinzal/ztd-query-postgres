@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace ZtdQuery\Platform\Postgres;
 
+use ZtdQuery\Sql\SqlToken;
+use ZtdQuery\Sql\SqlTokenKind;
+use ZtdQuery\Sql\SqlTokenStream;
+
 /**
  * Focused PostgreSQL SQL parser.
  *
@@ -18,8 +22,7 @@ final class PgSqlParser
     /**
      * Classify a SQL statement type.
      *
-     * @return string|null One of: 'SELECT', 'INSERT', 'UPDATE', 'DELETE',
-     *                     'TRUNCATE', 'CREATE_TABLE', 'DROP_TABLE', 'ALTER_TABLE', or null.
+     * @return 'SELECT'|'INSERT'|'UPDATE'|'DELETE'|'MERGE'|'TRUNCATE'|'CREATE_TABLE'|'DROP_TABLE'|'ALTER_TABLE'|'DO'|'TCL'|null
      */
     public function classifyStatement(string $sql): ?string
     {
@@ -39,129 +42,7 @@ final class PgSqlParser
      */
     public function splitStatements(string $sql): array
     {
-        $statements = [];
-        $current = '';
-        $len = strlen($sql);
-        $inSingleQuote = false;
-        $inDoubleQuote = false;
-        $inDollarQuote = false;
-        $dollarTag = '';
-        $inLineComment = false;
-        $inBlockComment = false;
-
-        for ($i = 0; $i < $len; $i++) {
-            $char = $sql[$i];
-            $next = $i + 1 < $len ? $sql[$i + 1] : '';
-
-            if ($inLineComment) {
-                $current .= $char;
-                if ($char === "\n") {
-                    $inLineComment = false;
-                }
-                continue;
-            }
-
-            if ($inBlockComment) {
-                $current .= $char;
-                if ($char === '*' && $next === '/') {
-                    $current .= '/';
-                    $i++;
-                    $inBlockComment = false;
-                }
-                continue;
-            }
-
-            if ($inDollarQuote) {
-                if ($char === '$') {
-                    $endTag = '$' . $dollarTag . '$';
-                    $remaining = substr($sql, $i, strlen($endTag));
-                    if ($remaining === $endTag) {
-                        $current .= $endTag;
-                        $i += strlen($endTag) - 1;
-                        $inDollarQuote = false;
-                        continue;
-                    }
-                }
-                $current .= $char;
-                continue;
-            }
-
-            if ($inSingleQuote) {
-                $current .= $char;
-                if ($char === "'" && $next === "'") {
-                    $current .= "'";
-                    $i++;
-                } elseif ($char === "'") {
-                    $inSingleQuote = false;
-                }
-                continue;
-            }
-
-            if ($inDoubleQuote) {
-                $current .= $char;
-                if ($char === '"' && $next === '"') {
-                    $current .= '"';
-                    $i++;
-                } elseif ($char === '"') {
-                    $inDoubleQuote = false;
-                }
-                continue;
-            }
-
-            if ($char === '-' && $next === '-') {
-                $current .= $char;
-                $inLineComment = true;
-                continue;
-            }
-
-            if ($char === '/' && $next === '*') {
-                $current .= $char;
-                $inBlockComment = true;
-                continue;
-            }
-
-            if ($char === "'") {
-                $current .= $char;
-                $inSingleQuote = true;
-                continue;
-            }
-
-            if ($char === '"') {
-                $current .= $char;
-                $inDoubleQuote = true;
-                continue;
-            }
-
-            if ($char === '$') {
-                $tag = $this->extractDollarTag($sql, $i);
-                if ($tag !== null) {
-                    $dollarTag = $tag;
-                    $fullTag = '$' . $tag . '$';
-                    $current .= $fullTag;
-                    $i += strlen($fullTag) - 1;
-                    $inDollarQuote = true;
-                    continue;
-                }
-            }
-
-            if ($char === ';') {
-                $stmt = trim($current);
-                if ($stmt !== '') {
-                    $statements[] = $stmt;
-                }
-                $current = '';
-                continue;
-            }
-
-            $current .= $char;
-        }
-
-        $stmt = trim($current);
-        if ($stmt !== '') {
-            $statements[] = $stmt;
-        }
-
-        return $statements;
+        return SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->splitStatements();
     }
 
     /**
@@ -242,6 +123,147 @@ final class PgSqlParser
         return preg_match('/\bON\s+CONFLICT\b/i', $sql) === 1;
     }
 
+    public function extractOnConflictTarget(string $sql): ?PgSqlConflictTarget
+    {
+        $tokens = SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->significantTokens();
+        $conflict = self::findOnConflictTargetStart($tokens);
+        if ($conflict === null) {
+            return null;
+        }
+
+        $next = $tokens[$conflict] ?? null;
+        if ($next === null) {
+            return null;
+        }
+        if ($next->isKeyword('DO')) {
+            return new PgSqlConflictTarget(false);
+        }
+        if ($next->isKeyword('ON')) {
+            $constraintKeyword = $tokens[$conflict + 1] ?? null;
+            if ($constraintKeyword === null) {
+                return null;
+            }
+            if (!$constraintKeyword->isKeyword('CONSTRAINT')) {
+                return null;
+            }
+            $constraintToken = $tokens[$conflict + 2] ?? null;
+            if ($constraintToken === null) {
+                return null;
+            }
+            $identifier = SqlTokenStream::tokenize($constraintToken->text, PgSqlLexerProfile::create())->identifierAt();
+            if ($identifier === null) {
+                return null;
+            }
+
+            return new PgSqlConflictTarget(true, constraint: $identifier['name']);
+        }
+        if ($next->text !== '(') {
+            return null;
+        }
+
+        $closing = self::findTopLevelSymbol($tokens, $conflict, ')');
+        if ($closing === null) {
+            return null;
+        }
+
+        $columnSql = substr(
+            $sql,
+            $next->endOffset(),
+            $tokens[$closing]->offset - $next->endOffset(),
+        );
+        $columns = [];
+        foreach (SqlTokenStream::tokenize($columnSql, PgSqlLexerProfile::create())->splitTopLevel() as $part) {
+            $stream = SqlTokenStream::tokenize($part, PgSqlLexerProfile::create());
+            $identifier = $stream->identifierAt();
+            if ($identifier === null) {
+                return null;
+            }
+            if ($identifier['next'] !== count($stream->significantTokens())) {
+                return null;
+            }
+            $columns[] = $identifier['name'];
+        }
+
+        $do = self::findTopLevelKeyword($tokens, $closing, 'DO');
+        if ($do === null) {
+            return null;
+        }
+
+        $predicate = null;
+        $afterColumns = $tokens[$closing + 1] ?? null;
+        if ($afterColumns !== null) {
+            if ($afterColumns->isKeyword('WHERE')) {
+                $predicate = trim(substr(
+                    $sql,
+                    $afterColumns->endOffset(),
+                    $tokens[$do]->offset - $afterColumns->endOffset(),
+                ));
+                if ($predicate === '') {
+                    return null;
+                }
+            }
+        }
+
+        return new PgSqlConflictTarget(true, $columns, $predicate);
+    }
+
+    /**
+     * @param list<SqlToken> $tokens
+     */
+    private static function findOnConflictTargetStart(array $tokens): ?int
+    {
+        foreach ($tokens as $index => $token) {
+            if (!$token->isTopLevel()) {
+                continue;
+            }
+            if (!$token->isKeyword('ON')) {
+                continue;
+            }
+            $following = $tokens[$index + 1] ?? $token;
+            if ($following->isKeyword('CONFLICT')) {
+                return $index + 2;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param list<SqlToken> $tokens
+     */
+    private static function findTopLevelSymbol(array $tokens, int $start, string $symbol): ?int
+    {
+        for ($index = $start, $count = count($tokens); $index < $count; $index++) {
+            $token = $tokens[$index];
+            if (!$token->isTopLevel()) {
+                continue;
+            }
+            if ($token->kind !== SqlTokenKind::Symbol) {
+                continue;
+            }
+            if ($token->text === $symbol) {
+                return $index;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param list<SqlToken> $tokens
+     */
+    private static function findTopLevelKeyword(array $tokens, int $start, string $keyword): ?int
+    {
+        for ($index = $start, $count = count($tokens); $index < $count; $index++) {
+            $token = $tokens[$index];
+            if ($token->isTopLevel() && $token->isKeyword($keyword)) {
+                return $index;
+            }
+        }
+
+        return null;
+    }
+
     /**
      * Extract ON CONFLICT ... DO UPDATE SET columns and values.
      *
@@ -249,20 +271,25 @@ final class PgSqlParser
      */
     public function extractOnConflictUpdateColumns(string $sql): array
     {
-        $sql = $this->maskComments($sql);
         $columns = [];
         /** @var array<string, string> $values */
         $values = [];
 
-        if (preg_match('/\bON\s+CONFLICT\b.*?\bDO\s+UPDATE\s+SET\s+(.+?)$/is', $sql, $m) !== 1) {
+        $action = SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->topLevelClause(['DO'], [['RETURNING']]);
+        if ($action === null) {
             return ['columns' => [], 'values' => []];
         }
-
-        $setClause = $m[1];
-        $setClause = preg_replace('/\s+WHERE\s+.+$/is', '', $setClause) ?? $setClause;
+        $actionStream = SqlTokenStream::tokenize($action, PgSqlLexerProfile::create());
+        if ($actionStream->firstTopLevelKeyword() !== 'UPDATE') {
+            return ['columns' => [], 'values' => []];
+        }
+        $setClause = $actionStream->topLevelClause(['SET'], [['WHERE']]);
+        if ($setClause === null) {
+            return ['columns' => [], 'values' => []];
+        }
         $setClause = rtrim($setClause, '; ');
 
-        $assignments = $this->splitByTopLevelComma($setClause);
+        $assignments = SqlTokenStream::tokenize($setClause, PgSqlLexerProfile::create())->splitTopLevel();
 
         foreach ($assignments as $assignment) {
             $assignment = trim($assignment);
@@ -274,6 +301,15 @@ final class PgSqlParser
         }
 
         return ['columns' => $columns, 'values' => $values];
+    }
+
+    public function extractOnConflictUpdateWhere(string $sql): ?string
+    {
+        return SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->topLevelClauseAfter(
+            ['DO', 'UPDATE', 'SET'],
+            ['WHERE'],
+            [['RETURNING']],
+        );
     }
 
     /**
@@ -334,13 +370,15 @@ final class PgSqlParser
      */
     public function extractUpdateSets(string $sql): array
     {
-        $sql = $this->maskComments($sql);
-        if (preg_match('/\bSET\s+(.+?)(?:\s+FROM\s+|\s+WHERE\s+|\s+RETURNING\s+|$)/is', $sql, $m) !== 1) {
+        $setClause = SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->topLevelClause(
+            ['SET'],
+            [['FROM'], ['WHERE'], ['RETURNING']],
+        );
+        if ($setClause === null) {
             return [];
         }
 
-        $setClause = $m[1];
-        $assignments = $this->splitByTopLevelComma($setClause);
+        $assignments = SqlTokenStream::tokenize($setClause, PgSqlLexerProfile::create())->splitTopLevel();
         $result = [];
 
         foreach ($assignments as $assignment) {
@@ -359,19 +397,10 @@ final class PgSqlParser
      */
     public function extractWhereClause(string $sql): ?string
     {
-        $sql = $this->maskComments($sql);
-        $stripped = $this->stripStringLiterals($sql);
-        if (preg_match('/\bWHERE\b/i', $stripped, $m, PREG_OFFSET_CAPTURE) !== 1) {
-            return null;
-        }
-
-        $whereClause = substr($sql, $m[0][1] + strlen('WHERE'));
-        $strippedTail = $this->stripStringLiterals($whereClause);
-        if (preg_match('/\s+(?:RETURNING|ORDER\s+BY|LIMIT)\b/is', $strippedTail, $tailMatch, PREG_OFFSET_CAPTURE) === 1) {
-            $whereClause = substr_replace($whereClause, '', $tailMatch[0][1]);
-        }
-
-        return trim($whereClause);
+        return SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->topLevelClause(
+            ['WHERE'],
+            [['RETURNING'], ['ORDER', 'BY'], ['LIMIT']],
+        );
     }
 
     /**
@@ -379,15 +408,10 @@ final class PgSqlParser
      */
     public function extractUpdateFromClause(string $sql): ?string
     {
-        $sql = $this->maskComments($sql);
-        if (preg_match('/\bFROM\s+(.+?)(?:\s+WHERE\s+|\s+RETURNING\s+|$)/is', $sql, $m) === 1) {
-            $stripped = $this->stripStringLiterals($sql);
-            if (preg_match('/\bSET\b.*?\bFROM\b/is', $stripped) === 1) {
-                return trim($m[1]);
-            }
-        }
-
-        return null;
+        return SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->topLevelClause(
+            ['FROM'],
+            [['WHERE'], ['RETURNING']],
+        );
     }
 
     /**
@@ -421,12 +445,10 @@ final class PgSqlParser
      */
     public function extractDeleteUsingClause(string $sql): ?string
     {
-        $sql = $this->maskComments($sql);
-        if (preg_match('/\bUSING\s+(.+?)(?:\s+WHERE\s+|\s+RETURNING\s+|$)/is', $sql, $m) === 1) {
-            return trim($m[1]);
-        }
-
-        return null;
+        return SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create())->topLevelClause(
+            ['USING'],
+            [['WHERE'], ['RETURNING']],
+        );
     }
 
     /**
@@ -434,12 +456,84 @@ final class PgSqlParser
      */
     public function extractTruncateTable(string $sql): ?string
     {
-        $sql = $this->maskComments($sql);
-        if (preg_match('/TRUNCATE\s+(?:TABLE\s+)?(?:ONLY\s+)?("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)/i', $sql, $m) === 1) {
-            return $this->unquoteIdentifier($this->stripSchemaPrefix($m[1]));
+        return $this->extractTruncateTables($sql)[0] ?? null;
+    }
+
+    /** @return list<string> */
+    public function extractTruncateTables(string $sql): array
+    {
+        $stream = SqlTokenStream::tokenize($sql, PgSqlLexerProfile::create());
+        $tokens = $stream->significantTokens();
+        if ($stream->firstTopLevelKeyword() !== 'TRUNCATE') {
+            return [];
         }
 
-        return null;
+        $index = 1;
+        $tableKeyword = $tokens[$index] ?? null;
+        if ($tableKeyword !== null && $tableKeyword->isKeyword('TABLE')) {
+            $index++;
+        }
+
+        $tableNames = [];
+        while (isset($tokens[$index])) {
+            if ($tokens[$index]->isKeyword('ONLY')) {
+                $index++;
+            }
+
+            $identifier = $this->truncateIdentifierAt($stream, $index);
+            if ($identifier === null) {
+                break;
+            }
+            $tableName = $identifier['name'];
+            $index = $identifier['next'];
+
+            while (($tokens[$index] ?? null)?->text === '.') {
+                $identifier = $this->truncateIdentifierAt($stream, $index + 1);
+                if ($identifier === null) {
+                    break 2;
+                }
+                $tableName = $identifier['name'];
+                $index = $identifier['next'];
+            }
+
+            if (($tokens[$index] ?? null)?->text === '*') {
+                $index++;
+            }
+            $tableNames[] = $tableName;
+
+            if (($tokens[$index] ?? null)?->text !== ',') {
+                break;
+            }
+            $index++;
+        }
+
+        return $tableNames;
+    }
+
+    /** @return array{name: string, next: int}|null */
+    private function truncateIdentifierAt(SqlTokenStream $stream, int $index): ?array
+    {
+        $tokens = $stream->significantTokens();
+        $prefix = $tokens[$index] ?? null;
+        if ($prefix === null) {
+            return null;
+        }
+        if ($prefix->isKeyword('U')) {
+            $ampersand = $tokens[$index + 1] ?? null;
+            if ($ampersand !== null && $ampersand->text === '&') {
+                $quotedIdentifier = $tokens[$index + 2] ?? null;
+                if ($quotedIdentifier === null || $quotedIdentifier->kind !== SqlTokenKind::QuotedIdentifier) {
+                    return null;
+                }
+
+                return [
+                    'name' => $this->unquoteIdentifier($quotedIdentifier->text),
+                    'next' => $index + 3,
+                ];
+            }
+        }
+
+        return $stream->identifierAt($index);
     }
 
     /**
@@ -580,53 +674,10 @@ final class PgSqlParser
      */
     public function extractSelectTableNames(string $sql): array
     {
-        $sql = $this->maskComments($sql);
-        $tables = [];
-        $stripped = $this->stripStringLiterals($sql);
-
-        if (preg_match_all('/\bFROM\s+(.+?)(?:\s+WHERE\b|\s+GROUP\b|\s+HAVING\b|\s+ORDER\b|\s+LIMIT\b|\s+OFFSET\b|\s+UNION\b|\s+INTERSECT\b|\s+EXCEPT\b|\s+FOR\b|\s*;|\s*$)/is', $stripped, $fromMatches) > 0) {
-            foreach ($fromMatches[1] as $fromClause) {
-                $tables = array_merge($tables, $this->extractTableRefsFromClause($fromClause));
-            }
-        }
-
-        if (preg_match_all('/\bJOIN\s+("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)/i', $stripped, $joinMatches) > 0) {
-            foreach ($joinMatches[1] as $joinTable) {
-                $tables[] = $this->unquoteIdentifier($this->stripSchemaPrefix($joinTable));
-            }
-        }
-
-        return array_values(array_unique($tables));
+        return (new PgSqlSelectRelationParser())->tableNames($sql);
     }
 
-    /**
-     * @return list<string>
-     */
-    private function extractTableRefsFromClause(string $clause): array
-    {
-        $tables = [];
-        $parts = $this->splitByTopLevelComma($clause);
-
-        foreach ($parts as $part) {
-            $part = trim($part);
-            if (str_starts_with($part, '(')) {
-                continue;
-            }
-            $part = preg_replace('/\b(?:INNER|LEFT|RIGHT|FULL|CROSS|NATURAL)\s+(?:OUTER\s+)?JOIN\b.*/is', '', $part) ?? $part;
-            $part = preg_replace('/\bJOIN\b.*/is', '', $part) ?? $part;
-            $part = trim($part);
-
-            if (preg_match('/^("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)(?:\s+(?:AS\s+)?("[^"]+"|[a-zA-Z_]\w*))?/i', $part, $m) === 1) {
-                $tableName = $this->unquoteIdentifier($this->stripSchemaPrefix($m[1]));
-                if ($tableName !== '' && !$this->isSqlKeyword($tableName)) {
-                    $tables[] = $tableName;
-                }
-            }
-        }
-
-        return $tables;
-    }
-
+    /** @return 'SELECT'|'INSERT'|'UPDATE'|'DELETE'|'MERGE'|null */
     private function classifyWithStatement(string $sql): ?string
     {
         $stripped = $this->stripStringLiterals($sql);
@@ -684,6 +735,7 @@ final class PgSqlParser
                 'INSERT' => 'INSERT',
                 'UPDATE' => 'UPDATE',
                 'DELETE' => 'DELETE',
+                'MERGE' => 'MERGE',
                 default => null,
             };
 
@@ -697,6 +749,7 @@ final class PgSqlParser
         return null;
     }
 
+    /** @return 'SELECT'|'INSERT'|'UPDATE'|'DELETE'|'MERGE'|'TRUNCATE'|'CREATE_TABLE'|'DROP_TABLE'|'ALTER_TABLE'|'DO'|'TCL'|null */
     private function classifySimpleStatement(string $sql): ?string
     {
         $trimmed = ltrim($sql);
@@ -713,6 +766,9 @@ final class PgSqlParser
         if (preg_match('/^DELETE\b/i', $trimmed) === 1) {
             return 'DELETE';
         }
+        if (preg_match('/^MERGE\b/i', $trimmed) === 1) {
+            return 'MERGE';
+        }
         if (preg_match('/^TRUNCATE\b/i', $trimmed) === 1) {
             return 'TRUNCATE';
         }
@@ -724,6 +780,9 @@ final class PgSqlParser
         }
         if (preg_match('/^ALTER\s+TABLE\b/i', $trimmed) === 1) {
             return 'ALTER_TABLE';
+        }
+        if (preg_match('/^DO(?:\s|$)/i', $trimmed) === 1) {
+            return 'DO';
         }
 
         if (preg_match('/^(?:BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET\s+TRANSACTION)\b/i', $trimmed) === 1) {
@@ -763,6 +822,7 @@ final class PgSqlParser
         $items = [];
         $current = '';
         $depth = 0;
+        $bracketDepth = 0;
         $len = strlen($str);
         $inSingleQuote = false;
 
@@ -809,7 +869,19 @@ final class PgSqlParser
                 continue;
             }
 
-            if ($char === ',' && $depth === 1) {
+            if ($char === '[') {
+                $bracketDepth++;
+                $current .= $char;
+                continue;
+            }
+
+            if ($char === ']' && $bracketDepth > 0) {
+                $bracketDepth--;
+                $current .= $char;
+                continue;
+            }
+
+            if ($char === ',' && $depth === 1 && $bracketDepth === 0) {
                 $items[] = trim($current);
                 $current = '';
                 continue;
@@ -819,86 +891,6 @@ final class PgSqlParser
         }
 
         return null;
-    }
-
-    /**
-     * Split a string by commas, respecting parentheses and quotes.
-     *
-     * @return list<string>
-     */
-    private function splitByTopLevelComma(string $str): array
-    {
-        $parts = [];
-        $current = '';
-        $depth = 0;
-        $inSingleQuote = false;
-        $inDoubleQuote = false;
-        $len = strlen($str);
-
-        for ($i = 0; $i < $len; $i++) {
-            $char = $str[$i];
-
-            if ($inSingleQuote) {
-                $current .= $char;
-                if ($char === "'" && isset($str[$i + 1]) && $str[$i + 1] === "'") {
-                    $current .= "'";
-                    $i++;
-                } elseif ($char === "'") {
-                    $inSingleQuote = false;
-                }
-                continue;
-            }
-
-            if ($inDoubleQuote) {
-                $current .= $char;
-                if ($char === '"' && isset($str[$i + 1]) && $str[$i + 1] === '"') {
-                    $current .= '"';
-                    $i++;
-                } elseif ($char === '"') {
-                    $inDoubleQuote = false;
-                }
-                continue;
-            }
-
-            if ($char === "'") {
-                $current .= $char;
-                $inSingleQuote = true;
-                continue;
-            }
-
-            if ($char === '"') {
-                $current .= $char;
-                $inDoubleQuote = true;
-                continue;
-            }
-
-            if ($char === '(') {
-                $depth++;
-                $current .= $char;
-                continue;
-            }
-
-            if ($char === ')') {
-                $depth--;
-                $current .= $char;
-                continue;
-            }
-
-            if ($char === ',' && $depth === 0) {
-                $parts[] = trim($current);
-                $current = '';
-                continue;
-            }
-
-            $current .= $char;
-        }
-
-        $val = trim($current);
-        if ($val !== '') {
-            $parts[] = $val;
-        }
-
-        return $parts;
     }
 
     private function maskComments(string $sql): string
@@ -968,40 +960,4 @@ final class PgSqlParser
         return null;
     }
 
-    private function extractDollarTag(string $sql, int $pos): ?string
-    {
-        $len = strlen($sql);
-        $i = $pos + 1;
-
-        if ($i < $len && $sql[$i] === '$') {
-            return '';
-        }
-
-        $tag = '';
-        while ($i < $len && (ctype_alnum($sql[$i]) || $sql[$i] === '_')) {
-            $tag .= $sql[$i];
-            $i++;
-        }
-
-        if ($i < $len && $sql[$i] === '$' && $tag !== '') {
-            return $tag;
-        }
-
-        return null;
-    }
-
-    private function isSqlKeyword(string $word): bool
-    {
-        $upper = strtoupper($word);
-
-        return in_array($upper, [
-            'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'EXISTS',
-            'BETWEEN', 'LIKE', 'IS', 'NULL', 'TRUE', 'FALSE', 'AS', 'ON',
-            'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'CROSS',
-            'NATURAL', 'USING', 'ORDER', 'BY', 'GROUP', 'HAVING', 'LIMIT',
-            'OFFSET', 'UNION', 'ALL', 'INTERSECT', 'EXCEPT', 'INSERT',
-            'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE', 'WITH', 'RECURSIVE',
-            'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'CAST', 'RETURNING',
-        ], true);
-    }
 }

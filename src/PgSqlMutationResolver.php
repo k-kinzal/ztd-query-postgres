@@ -8,6 +8,8 @@ use ZtdQuery\Exception\UnknownSchemaException;
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Rewrite\QueryKind;
 use ZtdQuery\Platform\SchemaParser;
+use ZtdQuery\Schema\ColumnType;
+use ZtdQuery\Schema\ColumnTypeFamily;
 use ZtdQuery\Schema\TableDefinitionRegistry;
 use ZtdQuery\Shadow\Mutation\CreateTableAsSelectMutation;
 use ZtdQuery\Shadow\Mutation\CreateTableLikeMutation;
@@ -15,11 +17,14 @@ use ZtdQuery\Shadow\Mutation\CreateTableMutation;
 use ZtdQuery\Shadow\Mutation\DeleteMutation;
 use ZtdQuery\Shadow\Mutation\DropTableMutation;
 use ZtdQuery\Shadow\Mutation\InsertMutation;
+use ZtdQuery\Shadow\Mutation\MultiTruncateMutation;
 use ZtdQuery\Shadow\Mutation\ShadowMutation;
+use ZtdQuery\Shadow\Mutation\SynchronizeMutation;
 use ZtdQuery\Shadow\Mutation\TruncateMutation;
 use ZtdQuery\Shadow\Mutation\UpdateMutation;
 use ZtdQuery\Shadow\Mutation\UpsertMutation;
 use ZtdQuery\Shadow\ShadowStore;
+use ZtdQuery\Shadow\ShadowTableState;
 
 /**
  * Resolves the appropriate ShadowMutation for a given PostgreSQL SQL statement.
@@ -30,6 +35,7 @@ final class PgSqlMutationResolver
     private TableDefinitionRegistry $registry;
     private SchemaParser $schemaParser;
     private PgSqlParser $parser;
+    private PgSqlPartitionParser $partitionParser;
 
     public function __construct(
         ShadowStore $shadowStore,
@@ -41,6 +47,7 @@ final class PgSqlMutationResolver
         $this->registry = $registry;
         $this->schemaParser = $schemaParser;
         $this->parser = $parser;
+        $this->partitionParser = new PgSqlPartitionParser();
     }
 
     /**
@@ -55,6 +62,7 @@ final class PgSqlMutationResolver
             'INSERT' => $this->resolveInsert($sql),
             'UPDATE' => $this->resolveUpdate($sql),
             'DELETE' => $this->resolveDelete($sql),
+            'MERGE' => $this->resolveMerge($sql),
             'TRUNCATE' => $this->resolveTruncate($sql),
             'CREATE_TABLE' => $this->resolveCreateTable($sql),
             'DROP_TABLE' => $this->resolveDropTable($sql),
@@ -72,25 +80,73 @@ final class PgSqlMutationResolver
 
         $definition = $this->registry->get($tableName);
         $primaryKeys = $definition !== null ? $definition->primaryKeys : [];
+        $storageTable = $this->storageTable($tableName);
 
         if ($this->parser->hasOnConflict($sql)) {
             $conflictInfo = $this->parser->extractOnConflictUpdateColumns($sql);
             $updateColumns = $conflictInfo['columns'];
+            $candidateKeys = $definition?->candidateKeys();
+            $conflictPredicate = null;
+            $target = $this->parser->extractOnConflictTarget($sql);
+            if ($target !== null && $definition !== null) {
+                $resolved = $target->resolve(
+                    $definition->candidateKeys(),
+                    $definition->partialUniqueIndexes,
+                    $sql,
+                );
+                $candidateKeys = $resolved['keys'];
+                $conflictPredicate = $resolved['predicate'];
+            }
+            $expressionParser = new PgSqlUpsertExpressionParser();
 
             if ($updateColumns !== []) {
-                /** @var array<string, string> $resolvedValues */
+                $databaseEvaluated = $candidateKeys !== null && $candidateKeys->keys() !== [];
+                /** @var array<string, \ZtdQuery\Shadow\Mutation\UpsertExpression|null> $resolvedValues */
                 $resolvedValues = [];
                 foreach ($conflictInfo['values'] as $col => $value) {
-                    $resolvedValues[$col] = $value;
+                    $resolvedValues[$col] = $databaseEvaluated
+                        ? $expressionParser->parseIfSupported($value, $tableName)
+                        : $expressionParser->parse($value, $tableName);
                 }
+                $predicate = $this->parser->extractOnConflictUpdateWhere($sql);
 
-                return new UpsertMutation($tableName, $primaryKeys, $updateColumns, $resolvedValues);
+                return new UpsertMutation(
+                    $storageTable,
+                    $primaryKeys,
+                    $updateColumns,
+                    $resolvedValues,
+                    $candidateKeys,
+                    $predicate !== null
+                        ? ($databaseEvaluated
+                            ? $expressionParser->parseIfSupported($predicate, $tableName)
+                            : $expressionParser->parse($predicate, $tableName))
+                        : null,
+                    databaseEvaluated: $databaseEvaluated,
+                    updateSqlValues: $conflictInfo['values'],
+                    updateSqlPredicate: $predicate,
+                    conflictPredicate: $conflictPredicate !== null
+                        ? $expressionParser->parse($conflictPredicate, $tableName)
+                        : null,
+                );
             }
 
-            return new InsertMutation($tableName, $primaryKeys, true);
+            return new InsertMutation(
+                $storageTable,
+                $primaryKeys,
+                true,
+                candidateKeys: $candidateKeys,
+                conflictPredicate: $conflictPredicate !== null
+                    ? $expressionParser->parse($conflictPredicate, $tableName)
+                    : null,
+            );
         }
 
-        return new InsertMutation($tableName, $primaryKeys, false);
+        return new InsertMutation(
+            $storageTable,
+            $primaryKeys,
+            false,
+            candidateKeys: $definition?->candidateKeys(),
+        );
     }
 
     private function resolveUpdate(string $sql): ShadowMutation
@@ -100,12 +156,16 @@ final class PgSqlMutationResolver
             throw new UnsupportedSqlException($sql, 'Cannot resolve UPDATE target');
         }
 
-        $this->shadowStore->ensure($targetTable);
-
         $definition = $this->registry->get($targetTable);
+        if ($definition === null && $this->shadowStore->state($targetTable) !== ShadowTableState::Initialized) {
+            throw new UnknownSchemaException($sql, $targetTable, 'table');
+        }
+
+        $storageTable = $this->storageTable($targetTable);
+        $this->shadowStore->ensure($storageTable);
         $primaryKeys = $definition !== null ? $definition->primaryKeys : [];
 
-        return new UpdateMutation($targetTable, $primaryKeys);
+        return new UpdateMutation($storageTable, $primaryKeys);
     }
 
     private function resolveDelete(string $sql): ShadowMutation
@@ -115,27 +175,46 @@ final class PgSqlMutationResolver
             throw new UnsupportedSqlException($sql, 'Cannot resolve DELETE target');
         }
 
-        $this->shadowStore->ensure($targetTable);
-
         $definition = $this->registry->get($targetTable);
-        $existingRows = $this->shadowStore->get($targetTable);
-        if ($definition === null && $existingRows === []) {
+        if ($definition === null && $this->shadowStore->state($targetTable) !== ShadowTableState::Initialized) {
             throw new UnknownSchemaException($sql, $targetTable, 'table');
         }
 
+        $storageTable = $this->storageTable($targetTable);
+        $this->shadowStore->ensure($storageTable);
         $primaryKeys = $definition !== null ? $definition->primaryKeys : [];
 
-        return new DeleteMutation($targetTable, $primaryKeys);
+        return new DeleteMutation($storageTable, $primaryKeys);
+    }
+
+    private function resolveMerge(string $sql): ShadowMutation
+    {
+        $statement = (new PgSqlMergeParser())->parse($sql);
+        $definition = $this->registry->get($statement->targetTable);
+        if ($definition === null
+            && $this->shadowStore->state($statement->targetTable) !== ShadowTableState::Initialized
+        ) {
+            throw new UnknownSchemaException($sql, $statement->targetTable, 'table');
+        }
+
+        return new SynchronizeMutation(
+            $this->storageTable($statement->targetTable),
+            $definition,
+            $sql,
+        );
     }
 
     private function resolveTruncate(string $sql): ShadowMutation
     {
-        $tableName = $this->parser->extractTruncateTable($sql);
-        if ($tableName === null) {
+        $tableNames = $this->parser->extractTruncateTables($sql);
+        if ($tableNames === []) {
             throw new UnsupportedSqlException($sql, 'Cannot resolve TRUNCATE target');
         }
+        if (count($tableNames) > 1) {
+            return new MultiTruncateMutation($tableNames);
+        }
 
-        return new TruncateMutation($tableName);
+        return new TruncateMutation($tableNames[0]);
     }
 
     private function resolveCreateTable(string $sql): ShadowMutation
@@ -151,6 +230,29 @@ final class PgSqlMutationResolver
             throw new UnsupportedSqlException($sql, 'Table already exists');
         }
 
+        $parentTable = $this->partitionParser->parentTable($sql);
+        if ($parentTable !== null) {
+            $parentDefinition = $this->registry->get($parentTable);
+            if ($parentDefinition === null) {
+                throw new UnknownSchemaException($sql, $parentTable, 'table');
+            }
+            if ($parentDefinition->partitionKey === null) {
+                throw new UnsupportedSqlException($sql, 'Partition parent has no partition key metadata');
+            }
+            $relation = $this->partitionParser->parseRelation($sql, $parentDefinition->partitionKey);
+            if ($relation === null) {
+                throw new UnsupportedSqlException($sql, 'Unsupported partition bound');
+            }
+
+            $definition = $parentDefinition->withPartitionRelation($relation);
+            $childKey = $this->partitionParser->parseKey($sql);
+            if ($childKey !== null) {
+                $definition = $definition->withPartitionKey($childKey);
+            }
+
+            return new CreateTableMutation($tableName, $definition, $this->registry, $sql, $ifNotExists);
+        }
+
         if ($this->parser->hasCreateTableLike($sql)) {
             $sourceTable = $this->parser->extractCreateTableLikeSource($sql);
             if ($sourceTable === null || !$this->registry->has($sourceTable)) {
@@ -164,12 +266,33 @@ final class PgSqlMutationResolver
             $selectSql = $this->parser->extractCreateTableSelectSql($sql);
             $columnNames = $selectSql !== null ? $this->extractSelectColumnNames($selectSql) : [];
 
-            return new CreateTableAsSelectMutation($tableName, $columnNames, $this->registry, $ifNotExists);
+            return new CreateTableAsSelectMutation(
+                $tableName,
+                $columnNames,
+                $this->registry,
+                new ColumnType(ColumnTypeFamily::TEXT, 'TEXT'),
+                $ifNotExists,
+            );
         }
 
         $definition = $this->schemaParser->parse($sql);
 
-        return new CreateTableMutation($tableName, $definition, $this->registry, $ifNotExists);
+        return new CreateTableMutation($tableName, $definition, $this->registry, $sql, $ifNotExists);
+    }
+
+    private function storageTable(string $tableName): string
+    {
+        $seen = [];
+        while (!in_array($tableName, $seen, true)) {
+            $seen[] = $tableName;
+            $parent = $this->registry->get($tableName)?->partitionRelation?->parentTable;
+            if ($parent === null) {
+                return $tableName;
+            }
+            $tableName = $parent;
+        }
+
+        return $tableName;
     }
 
     private function resolveDropTable(string $sql): ShadowMutation
@@ -185,7 +308,7 @@ final class PgSqlMutationResolver
             throw new UnknownSchemaException($sql, $tableName, 'table');
         }
 
-        return new DropTableMutation($tableName, $this->registry, $ifExists);
+        return new DropTableMutation($tableName, $this->registry, $sql, $ifExists);
     }
 
     private function resolveAlterTable(string $sql): ?ShadowMutation

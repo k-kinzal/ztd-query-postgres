@@ -6,6 +6,7 @@ namespace Tests\Unit\Transformer;
 
 use Tests\Contract\TransformerContractTest;
 use ZtdQuery\Platform\Postgres\Transformer\SelectTransformer;
+use ZtdQuery\Platform\ValueRenderer;
 use ZtdQuery\Rewrite\SqlTransformer;
 use ZtdQuery\Schema\ColumnType;
 use ZtdQuery\Schema\ColumnTypeFamily;
@@ -13,12 +14,92 @@ use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 use ZtdQuery\Platform\Postgres\PgSqlCastRenderer;
 use ZtdQuery\Platform\Postgres\PgSqlIdentifierQuoter;
+use ZtdQuery\Platform\Postgres\PgSqlTableSample;
+use ZtdQuery\Platform\Postgres\PgSqlTableSampleParser;
+use ZtdQuery\Platform\Postgres\PgSqlTableSampleRewriter;
 
 #[CoversClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlSelectRelationParser::class)]
 #[UsesClass(PgSqlCastRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlValueRenderer::class)]
 #[UsesClass(PgSqlIdentifierQuoter::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlGeneratedColumnProjector::class)]
+#[UsesClass(PgSqlTableSampleParser::class)]
+#[UsesClass(PgSqlTableSampleRewriter::class)]
+#[UsesClass(PgSqlTableSample::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlLexerProfile::class)]
 final class SelectTransformerTest extends TransformerContractTest
 {
+    public function testTableSampleReadsFromGeneratedShadowCte(): void
+    {
+        $result = (new SelectTransformer())->transform(
+            'SELECT id FROM data TABLESAMPLE BERNOULLI (100)',
+            ['data' => [
+                'rows' => [['id' => 1], ['id' => 2]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ]],
+        );
+
+        self::assertStringStartsWith('WITH "data" AS MATERIALIZED', $result);
+        self::assertStringNotContainsString('TABLESAMPLE', $result);
+        self::assertStringContainsString('FROM data)', $result);
+    }
+
+    public function testGeneratedColumnsAreRecomputedFromBaseRow(): void
+    {
+        $result = (new SelectTransformer())->transform('SELECT total FROM orders', [
+            'orders' => [
+                'rows' => [['qty' => 5, 'unit_price' => 10, 'total' => null]],
+                'columns' => ['qty', 'unit_price', 'total'],
+                'columnTypes' => [],
+                'generatedExpressions' => ['total' => '(qty * unit_price)'],
+            ],
+        ]);
+
+        self::assertStringContainsString('(qty * unit_price) AS "total"', $result);
+        self::assertStringContainsString('AS "__ztd_generated_source"', $result);
+    }
+
+    public function testTransformMaterializesViewAfterItsShadowTable(): void
+    {
+        $tables = [
+            'users' => [
+                'rows' => [['id' => 1]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+            'active_users' => [
+                'viewSql' => 'SELECT * FROM users WHERE id > 0',
+            ],
+            'active_user_count' => [
+                'viewSql' => 'SELECT count(*) AS total FROM active_users',
+            ],
+        ];
+
+        self::assertSame(
+            "WITH \"users\" AS MATERIALIZED (SELECT CAST(1 AS INTEGER) AS \"id\"),\n\"active_users\" AS MATERIALIZED (SELECT * FROM users WHERE id > 0),\n\"active_user_count\" AS MATERIALIZED (SELECT count(*) AS total FROM active_users)\nSELECT * FROM active_user_count",
+            (new SelectTransformer())->transform('SELECT * FROM active_user_count', $tables),
+        );
+    }
+
+    public function testUsesInjectedValueRenderer(): void
+    {
+        $valueRenderer = self::createStub(ValueRenderer::class);
+        $valueRenderer->method('renderValue')->willReturn('CUSTOM_VALUE');
+        $transformer = new SelectTransformer(null, null, $valueRenderer);
+        $tables = [
+            'users' => [
+                'rows' => [['id' => 1]],
+                'columns' => ['id'],
+                'columnTypes' => [],
+            ],
+        ];
+
+        self::assertStringContainsString('CUSTOM_VALUE', $transformer->transform('SELECT * FROM users', $tables));
+    }
+
     protected function createTransformer(): SqlTransformer
     {
         return new SelectTransformer();

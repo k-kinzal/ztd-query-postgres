@@ -6,6 +6,9 @@ namespace ZtdQuery\Platform\Postgres;
 
 use ZtdQuery\Connection\ConnectionInterface;
 use ZtdQuery\Platform\SchemaReflector;
+use ZtdQuery\Platform\ViewReflector;
+use ZtdQuery\Schema\PartialUniqueIndex;
+use ZtdQuery\Schema\ViewDefinition;
 
 /**
  * Fetches PostgreSQL schema information via information_schema queries.
@@ -13,9 +16,12 @@ use ZtdQuery\Platform\SchemaReflector;
  * Reconstructs CREATE TABLE statements from pg_catalog/information_schema
  * since PostgreSQL has no SHOW CREATE TABLE equivalent.
  */
-final class PgSqlSchemaReflector implements SchemaReflector
+final class PgSqlSchemaReflector implements SchemaReflector, ViewReflector
 {
     private ConnectionInterface $connection;
+
+    /** @var array<string, array<string, PartialUniqueIndex>> */
+    private array $partialUniqueIndexes = [];
 
     public function __construct(ConnectionInterface $connection)
     {
@@ -62,14 +68,45 @@ final class PgSqlSchemaReflector implements SchemaReflector
         return $result;
     }
 
+    /** @return array<string, array<string, PartialUniqueIndex>> */
+    public function partialUniqueIndexes(): array
+    {
+        return $this->partialUniqueIndexes;
+    }
+
+    /** {@inheritDoc} */
+    public function reflectViews(): array
+    {
+        $stmt = $this->connection->query(
+            'SELECT viewname, definition FROM pg_views WHERE schemaname = current_schema() ORDER BY viewname',
+        );
+        if ($stmt === false) {
+            return [];
+        }
+
+        $definitions = [];
+        foreach ($stmt->fetchAll() as $row) {
+            $viewName = $row['viewname'] ?? null;
+            $query = $row['definition'] ?? null;
+            if (!is_string($viewName) || $viewName === '' || !is_string($query) || trim($query) === '') {
+                continue;
+            }
+            $definitions[$viewName] = (new PgSqlViewDefinitionParser())->fromQuery($query);
+        }
+
+        return $definitions;
+    }
+
     private function buildCreateTableSql(string $tableName): ?string
     {
+        $escapedTableName = str_replace("'", "''", $tableName);
         $stmt = $this->connection->query(
             "SELECT column_name, data_type, character_maximum_length, "
             . "numeric_precision, numeric_scale, is_nullable, column_default, "
-            . "udt_name "
+            . "udt_name, domain_schema, domain_name, is_identity, identity_generation, "
+            . "is_generated, generation_expression "
             . "FROM information_schema.columns "
-            . "WHERE table_schema = current_schema() AND table_name = '" . str_replace("'", "''", $tableName) . "' "
+            . "WHERE table_schema = current_schema() AND table_name = '" . $escapedTableName . "' "
             . "ORDER BY ordinal_position"
         );
         if ($stmt === false) {
@@ -93,7 +130,7 @@ final class PgSqlSchemaReflector implements SchemaReflector
             . "  ON tc.constraint_name = kcu.constraint_name "
             . "  AND tc.table_schema = kcu.table_schema "
             . "WHERE tc.table_schema = current_schema() "
-            . "  AND tc.table_name = '" . str_replace("'", "''", $tableName) . "' "
+            . "  AND tc.table_name = '" . $escapedTableName . "' "
             . "  AND tc.constraint_type = 'PRIMARY KEY' "
             . "ORDER BY kcu.ordinal_position"
         );
@@ -110,27 +147,125 @@ final class PgSqlSchemaReflector implements SchemaReflector
         }
 
         $uniqueStmt = $this->connection->query(
-            "SELECT tc.constraint_name, kcu.column_name "
-            . "FROM information_schema.table_constraints tc "
-            . "JOIN information_schema.key_column_usage kcu "
-            . "  ON tc.constraint_name = kcu.constraint_name "
-            . "  AND tc.table_schema = kcu.table_schema "
-            . "WHERE tc.table_schema = current_schema() "
-            . "  AND tc.table_name = '" . str_replace("'", "''", $tableName) . "' "
-            . "  AND tc.constraint_type = 'UNIQUE' "
-            . "ORDER BY tc.constraint_name, kcu.ordinal_position"
+            'SELECT index_relation.relname AS constraint_name, attribute.attname AS column_name, '
+            . 'pg_get_expr(index_metadata.indpred, index_metadata.indrelid) AS predicate '
+            . 'FROM pg_catalog.pg_class table_relation '
+            . 'JOIN pg_catalog.pg_namespace namespace ON namespace.oid = table_relation.relnamespace '
+            . 'JOIN pg_catalog.pg_index index_metadata ON index_metadata.indrelid = table_relation.oid '
+            . 'JOIN pg_catalog.pg_class index_relation ON index_relation.oid = index_metadata.indexrelid '
+            . 'JOIN LATERAL unnest(index_metadata.indkey) WITH ORDINALITY key_column(attnum, ordinality) '
+            . '  ON key_column.ordinality <= index_metadata.indnkeyatts '
+            . 'LEFT JOIN pg_catalog.pg_attribute attribute '
+            . '  ON attribute.attrelid = table_relation.oid AND attribute.attnum = key_column.attnum '
+            . 'WHERE namespace.nspname = current_schema() '
+            . "  AND table_relation.relname = '" . $escapedTableName . "' "
+            . '  AND index_metadata.indisunique '
+            . '  AND index_metadata.indisvalid '
+            . '  AND NOT index_metadata.indisprimary '
+            . 'ORDER BY index_relation.relname, key_column.ordinality'
         );
 
         /** @var array<string, list<string>> $uniqueConstraints */
         $uniqueConstraints = [];
+        /** @var array<string, array{columns: list<string>, predicate: string}> $partialIndexes */
+        $partialIndexes = [];
+        /** @var array<string, string> $invalidIndexes */
+        $invalidIndexes = [];
         if ($uniqueStmt !== false) {
             $uniqueRows = $uniqueStmt->fetchAll();
             foreach ($uniqueRows as $uRow) {
                 $constraintName = $uRow['constraint_name'] ?? '';
                 $colName = $uRow['column_name'] ?? null;
-                if (is_string($constraintName) && is_string($colName)) {
-                    $uniqueConstraints[$constraintName][] = '"' . $colName . '"';
+                $predicate = $uRow['predicate'] ?? null;
+                if (!is_string($constraintName)) {
+                    continue;
                 }
+                if ($constraintName === '') {
+                    continue;
+                }
+                if (!is_string($colName)) {
+                    $invalidIndexes[$constraintName] = $constraintName;
+                    continue;
+                }
+                if (!is_string($predicate) || trim($predicate) === '') {
+                    $uniqueConstraints[$constraintName][] = '"' . $colName . '"';
+
+                    continue;
+                }
+                if (!isset($partialIndexes[$constraintName])) {
+                    $partialIndexes[$constraintName] = ['columns' => [$colName], 'predicate' => $predicate];
+
+                    continue;
+                }
+                $partialIndexes[$constraintName]['columns'][] = $colName;
+            }
+        }
+        foreach ($invalidIndexes as $invalidIndex) {
+            unset($uniqueConstraints[$invalidIndex], $partialIndexes[$invalidIndex]);
+        }
+        $this->partialUniqueIndexes[$tableName] = [];
+        foreach ($partialIndexes as $name => $index) {
+            if ($index['columns'] === []) {
+                continue;
+            }
+            $this->partialUniqueIndexes[$tableName][$name] = new PartialUniqueIndex(
+                $name,
+                $index['columns'],
+                $index['predicate'],
+            );
+        }
+
+        $foreignKeyStmt = $this->connection->query(
+            "SELECT fk.constraint_name, fk.column_name, "
+            . "pk.table_name AS foreign_table_name, pk.column_name AS foreign_column_name, "
+            . "rc.update_rule, rc.delete_rule "
+            . "FROM information_schema.referential_constraints rc "
+            . "JOIN information_schema.key_column_usage fk "
+            . "  ON fk.constraint_catalog = rc.constraint_catalog "
+            . "  AND fk.constraint_schema = rc.constraint_schema "
+            . "  AND fk.constraint_name = rc.constraint_name "
+            . "JOIN information_schema.key_column_usage pk "
+            . "  ON pk.constraint_catalog = rc.unique_constraint_catalog "
+            . "  AND pk.constraint_schema = rc.unique_constraint_schema "
+            . "  AND pk.constraint_name = rc.unique_constraint_name "
+            . "  AND pk.ordinal_position = fk.position_in_unique_constraint "
+            . "WHERE fk.table_schema = current_schema() "
+            . "  AND fk.table_name = '" . $escapedTableName . "' "
+            . "ORDER BY fk.constraint_name, fk.ordinal_position"
+        );
+
+        /** @var array<string, array{columns: list<string>, table: string, referencedColumns: list<string>, onUpdate: string, onDelete: string}> $foreignKeys */
+        $foreignKeys = [];
+        if ($foreignKeyStmt !== false) {
+            foreach ($foreignKeyStmt->fetchAll() as $foreignKeyRow) {
+                $constraintName = $foreignKeyRow['constraint_name'] ?? null;
+                $columnName = $foreignKeyRow['column_name'] ?? null;
+                $foreignTable = $foreignKeyRow['foreign_table_name'] ?? null;
+                $foreignColumn = $foreignKeyRow['foreign_column_name'] ?? null;
+                $onUpdate = $foreignKeyRow['update_rule'] ?? null;
+                $onDelete = $foreignKeyRow['delete_rule'] ?? null;
+                if (!is_string($constraintName)
+                    || !is_string($columnName)
+                    || !is_string($foreignTable)
+                    || !is_string($foreignColumn)
+                    || !is_string($onUpdate)
+                    || !is_string($onDelete)
+                ) {
+                    continue;
+                }
+                if (!isset($foreignKeys[$constraintName])) {
+                    $foreignKeys[$constraintName] = [
+                        'columns' => ['"' . $columnName . '"'],
+                        'table' => $foreignTable,
+                        'referencedColumns' => ['"' . $foreignColumn . '"'],
+                        'onUpdate' => $onUpdate,
+                        'onDelete' => $onDelete,
+                    ];
+
+                    continue;
+                }
+                $foreignKeys[$constraintName]['columns'][] = '"' . $columnName . '"';
+                $foreignKeys[$constraintName]['referencedColumns'][] = '"' . $foreignColumn . '"';
             }
         }
 
@@ -142,6 +277,14 @@ final class PgSqlSchemaReflector implements SchemaReflector
 
         foreach ($uniqueConstraints as $constraintName => $constraintCols) {
             $parts[] = 'CONSTRAINT "' . $constraintName . '" UNIQUE (' . implode(', ', $constraintCols) . ')';
+        }
+
+        foreach ($foreignKeys as $constraintName => $foreignKey) {
+            $parts[] = 'CONSTRAINT "' . $constraintName . '" FOREIGN KEY ('
+                . implode(', ', $foreignKey['columns']) . ') REFERENCES "'
+                . $foreignKey['table'] . '" (' . implode(', ', $foreignKey['referencedColumns']) . ')'
+                . ' ON UPDATE ' . $foreignKey['onUpdate']
+                . ' ON DELETE ' . $foreignKey['onDelete'];
         }
 
         return 'CREATE TABLE "' . $tableName . '" (' . "\n  " . implode(",\n  ", $parts) . "\n)";
@@ -157,7 +300,7 @@ final class PgSqlSchemaReflector implements SchemaReflector
         $dataType = strtoupper(isset($col['data_type']) && is_string($col['data_type']) ? $col['data_type'] : 'TEXT');
         $udtName = strtoupper(isset($col['udt_name']) && is_string($col['udt_name']) ? $col['udt_name'] : '');
 
-        $typeSql = $this->buildTypeSql($dataType, $udtName, $col);
+        $typeSql = $this->domainTypeSql($col) ?? $this->buildTypeSql($dataType, $udtName, $col);
 
         $def = "$name $typeSql";
 
@@ -166,12 +309,50 @@ final class PgSqlSchemaReflector implements SchemaReflector
             $def .= ' NOT NULL';
         }
 
-        $default = $col['column_default'] ?? null;
-        if (is_string($default) && $default !== '') {
-            $def .= ' DEFAULT ' . $default;
+        $generationExpression = $col['generation_expression'] ?? null;
+        if (($col['is_generated'] ?? 'NEVER') === 'ALWAYS'
+            && is_string($generationExpression)
+            && trim($generationExpression) !== ''
+        ) {
+            $def .= ' GENERATED ALWAYS AS (' . $generationExpression . ') STORED';
+        } elseif (($col['is_identity'] ?? 'NO') === 'YES') {
+            $identityGeneration = ($col['identity_generation'] ?? 'BY DEFAULT') === 'ALWAYS'
+                ? 'ALWAYS'
+                : 'BY DEFAULT';
+            $def .= " GENERATED $identityGeneration AS IDENTITY";
+        } else {
+            $default = $col['column_default'] ?? null;
+            if (is_string($default) && $default !== '') {
+                $def .= ' DEFAULT ' . $default;
+            }
         }
 
         return $def;
+    }
+
+    /**
+     * @param array<string, mixed> $col
+     */
+    private function domainTypeSql(array $col): ?string
+    {
+        $domainName = $col['domain_name'] ?? null;
+        if (!is_string($domainName)) {
+            return null;
+        }
+        if ($domainName === '') {
+            return null;
+        }
+
+        $quoter = new PgSqlIdentifierQuoter();
+        $domainSchema = $col['domain_schema'] ?? null;
+        if (!is_string($domainSchema)) {
+            return $quoter->quote($domainName);
+        }
+        if ($domainSchema === '') {
+            return $quoter->quote($domainName);
+        }
+
+        return $quoter->quote($domainSchema) . '.' . $quoter->quote($domainName);
     }
 
     /**
@@ -182,23 +363,12 @@ final class PgSqlSchemaReflector implements SchemaReflector
         return match ($dataType) {
             'CHARACTER VARYING' => $this->buildVarcharType($col),
             'CHARACTER' => $this->buildCharType($col),
+            'BIT', 'BIT VARYING' => $this->buildBitType($dataType, $col),
             'NUMERIC' => $this->buildNumericType($col),
-            'INTEGER' => 'INTEGER',
-            'SMALLINT' => 'SMALLINT',
-            'BIGINT' => 'BIGINT',
-            'REAL' => 'REAL',
-            'DOUBLE PRECISION' => 'DOUBLE PRECISION',
-            'BOOLEAN' => 'BOOLEAN',
-            'DATE' => 'DATE',
             'TIMESTAMP WITHOUT TIME ZONE' => 'TIMESTAMP',
             'TIMESTAMP WITH TIME ZONE' => 'TIMESTAMPTZ',
             'TIME WITHOUT TIME ZONE' => 'TIME',
             'TIME WITH TIME ZONE' => 'TIMETZ',
-            'TEXT' => 'TEXT',
-            'BYTEA' => 'BYTEA',
-            'JSON' => 'JSON',
-            'JSONB' => 'JSONB',
-            'UUID' => 'UUID',
             'USER-DEFINED' => $this->resolveUserDefinedType($udtName),
             'ARRAY' => $this->resolveArrayType($udtName),
             default => $dataType,
@@ -229,6 +399,19 @@ final class PgSqlSchemaReflector implements SchemaReflector
         }
 
         return 'CHAR(1)';
+    }
+
+    /**
+     * @param array<string, mixed> $col
+     */
+    private function buildBitType(string $dataType, array $col): string
+    {
+        $maxLen = $col['character_maximum_length'] ?? null;
+        if (is_int($maxLen) || (is_string($maxLen) && ctype_digit($maxLen))) {
+            return "$dataType($maxLen)";
+        }
+
+        return $dataType;
     }
 
     /**

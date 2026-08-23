@@ -8,30 +8,174 @@ use PHPUnit\Framework\TestCase;
 use ZtdQuery\Exception\UnknownSchemaException;
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Platform\Postgres\PgSqlMutationResolver;
+use ZtdQuery\Platform\Postgres\PgSqlMergeParser;
 use ZtdQuery\Platform\Postgres\PgSqlParser;
 use ZtdQuery\Platform\Postgres\PgSqlSchemaParser;
+use ZtdQuery\Platform\Postgres\PgSqlPartitionParser;
 use ZtdQuery\Rewrite\QueryKind;
 use ZtdQuery\Schema\TableDefinition;
 use ZtdQuery\Schema\TableDefinitionRegistry;
+use ZtdQuery\Schema\PartialUniqueIndex;
 use ZtdQuery\Shadow\Mutation\CreateTableAsSelectMutation;
 use ZtdQuery\Shadow\Mutation\CreateTableLikeMutation;
 use ZtdQuery\Shadow\Mutation\CreateTableMutation;
 use ZtdQuery\Shadow\Mutation\DeleteMutation;
 use ZtdQuery\Shadow\Mutation\DropTableMutation;
 use ZtdQuery\Shadow\Mutation\InsertMutation;
+use ZtdQuery\Shadow\Mutation\MultiTruncateMutation;
+use ZtdQuery\Shadow\Mutation\SynchronizeMutation;
 use ZtdQuery\Shadow\Mutation\TruncateMutation;
 use ZtdQuery\Shadow\Mutation\UpdateMutation;
 use ZtdQuery\Shadow\Mutation\UpsertMutation;
 use ZtdQuery\Shadow\ShadowStore;
+use ZtdQuery\Shadow\ShadowTableState;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 
 #[CoversClass(PgSqlMutationResolver::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlColumnTypeMapper::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlForeignKeyDefinitionParser::class)]
 #[UsesClass(PgSqlParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlUpsertExpressionParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlConflictTarget::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 #[UsesClass(PgSqlSchemaParser::class)]
+#[UsesClass(PgSqlPartitionParser::class)]
+#[UsesClass(PgSqlMergeParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlMergeStatement::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlMergeClause::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlMergeMatchKind::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlMergeActionKind::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlLexerProfile::class)]
 final class PgSqlMutationResolverTest extends TestCase
 {
+    public function testPartitionDdlInheritsParentSchemaAndChildDmlUsesParentStorage(): void
+    {
+        $shadowStore = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $schemaParser = new PgSqlSchemaParser();
+        $parent = $schemaParser->parse(
+            'CREATE TABLE logs (id INTEGER, log_date DATE, PRIMARY KEY (id, log_date)) '
+            . 'PARTITION BY RANGE (log_date)',
+        );
+        self::assertNotNull($parent);
+        $registry->register('logs', $parent);
+        $resolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, new PgSqlParser());
+
+        $create = $resolver->resolve(
+            "CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+            'CREATE_TABLE',
+            QueryKind::DDL_SIMULATED,
+        );
+        self::assertNotNull($create);
+        $create->apply($shadowStore, []);
+
+        $child = $registry->get('logs_2024');
+        self::assertNotNull($child);
+        self::assertSame($parent->columns, $child->columns);
+        self::assertSame('logs', $child->partitionRelation?->parentTable);
+
+        $insert = $resolver->resolve(
+            "INSERT INTO logs_2024 VALUES (1, '2024-06-01')",
+            'INSERT',
+            QueryKind::WRITE_SIMULATED,
+        );
+        self::assertNotNull($insert);
+        self::assertSame('logs', $insert->tableName());
+        $insert->apply($shadowStore, [['id' => 1, 'log_date' => '2024-06-01']]);
+
+        self::assertSame([['id' => 1, 'log_date' => '2024-06-01']], $shadowStore->get('logs'));
+        self::assertSame([], $shadowStore->get('logs_2024'));
+    }
+
+    public function testPartitionDdlRejectsUnknownParentAndUnsupportedHashBounds(): void
+    {
+        $shadowStore = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $schemaParser = new PgSqlSchemaParser();
+        $resolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, new PgSqlParser());
+
+        try {
+            $resolver->resolve(
+                'CREATE TABLE child PARTITION OF missing FOR VALUES IN (1)',
+                'CREATE_TABLE',
+                QueryKind::DDL_SIMULATED,
+            );
+            self::fail('Expected an unknown parent error.');
+        } catch (UnknownSchemaException) {
+            self::assertFalse($registry->has('child'));
+        }
+
+        $parent = $schemaParser->parse('CREATE TABLE values_table (id INTEGER) PARTITION BY HASH (id)');
+        self::assertNotNull($parent);
+        $registry->register('values_table', $parent);
+
+        $this->expectException(UnsupportedSqlException::class);
+        $resolver->resolve(
+            'CREATE TABLE values_0 PARTITION OF values_table FOR VALUES WITH (MODULUS 4, REMAINDER 0)',
+            'CREATE_TABLE',
+            QueryKind::DDL_SIMULATED,
+        );
+    }
+
+    public function testSubpartitionDdlStoresItsOwnPartitionKey(): void
+    {
+        $shadowStore = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $schemaParser = new PgSqlSchemaParser();
+        $parent = $schemaParser->parse(
+            'CREATE TABLE logs (id INTEGER, log_date DATE, level TEXT) PARTITION BY RANGE (log_date)',
+        );
+        self::assertNotNull($parent);
+        $registry->register('logs', $parent);
+        $resolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, new PgSqlParser());
+
+        $mutation = $resolver->resolve(
+            "CREATE TABLE logs_2024 PARTITION OF logs FOR VALUES FROM ('2024-01-01') TO ('2025-01-01') "
+            . 'PARTITION BY LIST (level)',
+            'CREATE_TABLE',
+            QueryKind::DDL_SIMULATED,
+        );
+        self::assertNotNull($mutation);
+        $mutation->apply($shadowStore, []);
+
+        $key = $registry->get('logs_2024')?->partitionKey;
+        self::assertNotNull($key);
+        self::assertSame(\ZtdQuery\Schema\TablePartitionStrategy::List, $key->strategy);
+        self::assertSame(['level'], $key->expressions);
+    }
+
+    public function testNestedPartitionDmlTargetsRootStorage(): void
+    {
+        $shadowStore = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $definition = new TableDefinition(['id'], ['id' => 'INTEGER'], ['id'], [], []);
+        $registry->register('root_table', $definition);
+        $registry->register('child_table', $definition->withPartitionRelation(
+            new \ZtdQuery\Schema\TablePartitionRelation('root_table', 'id >= 0'),
+        ));
+        $registry->register('grandchild_table', $definition->withPartitionRelation(
+            new \ZtdQuery\Schema\TablePartitionRelation('child_table', 'id < 10'),
+        ));
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            $registry,
+            new PgSqlSchemaParser(),
+            new PgSqlParser(),
+        );
+
+        $mutation = $resolver->resolve(
+            'INSERT INTO grandchild_table VALUES (1)',
+            'INSERT',
+            QueryKind::WRITE_SIMULATED,
+        );
+
+        self::assertNotNull($mutation);
+        self::assertSame('root_table', $mutation->tableName());
+    }
+
+
     public function testResolveInsertReturnsInsertMutation(): void
     {
         $shadowStore = new ShadowStore();
@@ -49,6 +193,7 @@ final class PgSqlMutationResolverTest extends TestCase
             [],
             []
         ));
+        $shadowStore->set('users', [['id' => 1, 'name' => 'Existing']]);
         $mutation = $resolver->resolve(
             "INSERT INTO users (id, name) VALUES (1, 'Alice')",
             'INSERT',
@@ -56,6 +201,8 @@ final class PgSqlMutationResolverTest extends TestCase
         );
 
         self::assertInstanceOf(InsertMutation::class, $mutation);
+        $mutation->apply($shadowStore, [['id' => 1, 'name' => 'Inserted']]);
+        self::assertCount(2, $shadowStore->get('users'));
     }
 
     public function testResolveInsertWithOnConflictDoUpdateReturnsUpsertMutation(): void
@@ -76,7 +223,7 @@ final class PgSqlMutationResolverTest extends TestCase
             []
         ));
         $mutation = $resolver->resolve(
-            "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+            "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT (id) DO UPDATE SET name = upper(users.name)",
             'INSERT',
             QueryKind::WRITE_SIMULATED
         );
@@ -101,6 +248,47 @@ final class PgSqlMutationResolverTest extends TestCase
             [],
             []
         ));
+        $shadowStore->set('users', [['id' => 1, 'name' => 'Existing']]);
+        $mutation = $resolver->resolve(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT DO NOTHING",
+            'INSERT',
+            QueryKind::WRITE_SIMULATED
+        );
+
+        self::assertInstanceOf(InsertMutation::class, $mutation);
+        $mutation->apply($shadowStore, [['id' => 1, 'name' => 'Ignored']]);
+        self::assertSame([['id' => 1, 'name' => 'Existing']], $shadowStore->get('users'));
+    }
+
+    public function testResolveOnConflictDoUpdateWithoutRegisteredSchema(): void
+    {
+        $shadowStore = new ShadowStore();
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            new TableDefinitionRegistry(),
+            new PgSqlSchemaParser(),
+            new PgSqlParser()
+        );
+
+        $mutation = $resolver->resolve(
+            "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+            'INSERT',
+            QueryKind::WRITE_SIMULATED
+        );
+
+        self::assertInstanceOf(UpsertMutation::class, $mutation);
+    }
+
+    public function testResolveOnConflictDoNothingWithoutRegisteredSchema(): void
+    {
+        $shadowStore = new ShadowStore();
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            new TableDefinitionRegistry(),
+            new PgSqlSchemaParser(),
+            new PgSqlParser()
+        );
+
         $mutation = $resolver->resolve(
             "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT DO NOTHING",
             'INSERT',
@@ -173,7 +361,7 @@ final class PgSqlMutationResolverTest extends TestCase
             QueryKind::WRITE_SIMULATED
         );
 
-        self::assertSame([], $shadowStore->get('users'));
+        self::assertSame(ShadowTableState::Initialized, $shadowStore->state('users'));
     }
 
     public function testResolveUpdateWithoutTableThrows(): void
@@ -271,6 +459,25 @@ final class PgSqlMutationResolverTest extends TestCase
         );
 
         self::assertInstanceOf(TruncateMutation::class, $mutation);
+    }
+
+    public function testResolveMultiTableTruncateReturnsMultiTruncateMutation(): void
+    {
+        $resolver = new PgSqlMutationResolver(
+            new ShadowStore(),
+            new TableDefinitionRegistry(),
+            new PgSqlSchemaParser(),
+            new PgSqlParser(),
+        );
+
+        $mutation = $resolver->resolve(
+            'TRUNCATE TABLE alpha, beta RESTART IDENTITY',
+            'TRUNCATE',
+            QueryKind::WRITE_SIMULATED,
+        );
+
+        self::assertInstanceOf(MultiTruncateMutation::class, $mutation);
+        self::assertSame(['alpha', 'beta'], $mutation->tableNames());
     }
 
     public function testResolveTruncateWithoutTableThrows(): void
@@ -1700,7 +1907,7 @@ final class PgSqlMutationResolverTest extends TestCase
         self::assertSame('new_table', $mutation->tableName());
     }
 
-    public function testResolveUpdateNoRegistryStillWorks(): void
+    public function testResolveUpdateNoRegistryThrowsUnknownSchema(): void
     {
         $shadowStore = new ShadowStore();
         $registry = new TableDefinitionRegistry();
@@ -1710,14 +1917,12 @@ final class PgSqlMutationResolverTest extends TestCase
             new PgSqlSchemaParser(),
             new PgSqlParser()
         );
-        $mutation = $resolver->resolve(
+        $this->expectException(UnknownSchemaException::class);
+        $resolver->resolve(
             "UPDATE new_table SET name = 'Bob' WHERE id = 1",
             'UPDATE',
             QueryKind::WRITE_SIMULATED
         );
-
-        self::assertInstanceOf(UpdateMutation::class, $mutation);
-        self::assertSame('new_table', $mutation->tableName());
     }
 
     public function testResolveCreateTableAsSelectWithLowercaseSelectAndAs(): void
@@ -1785,6 +1990,7 @@ final class PgSqlMutationResolverTest extends TestCase
             [],
             []
         ));
+        $shadowStore->set('users', [['id' => 1, 'name' => 'Existing']]);
         $mutation = $resolver->resolve(
             "INSERT INTO users (id, name) VALUES (1, 'Alice') ON CONFLICT (id) DO UPDATE SET name = 'Bob', id = EXCLUDED.id",
             'INSERT',
@@ -1792,6 +1998,8 @@ final class PgSqlMutationResolverTest extends TestCase
         );
 
         self::assertInstanceOf(UpsertMutation::class, $mutation);
+        $mutation->apply($shadowStore, [['id' => 1, 'name' => 'Alice']]);
+        self::assertSame([['id' => 1, 'name' => 'Bob']], $shadowStore->get('users'));
     }
 
     public function testResolveDeleteWithShadowStoreOnlyNoRegistry(): void
@@ -2312,7 +2520,7 @@ final class PgSqlMutationResolverTest extends TestCase
         self::assertInstanceOf(UpsertMutation::class, $mutation);
     }
 
-    public function testResolveUpdateNoRegistryCreatesEmptyPrimaryKeys(): void
+    public function testResolveUpdateNoRegistryDoesNotCreateUnsafeMutation(): void
     {
         $shadowStore = new ShadowStore();
         $registry = new TableDefinitionRegistry();
@@ -2322,13 +2530,12 @@ final class PgSqlMutationResolverTest extends TestCase
             new PgSqlSchemaParser(),
             new PgSqlParser()
         );
-        $mutation = $resolver->resolve(
+        $this->expectException(UnknownSchemaException::class);
+        $resolver->resolve(
             "UPDATE unknown_table SET name = 'Bob' WHERE id = 1",
             'UPDATE',
             QueryKind::WRITE_SIMULATED
         );
-
-        self::assertInstanceOf(UpdateMutation::class, $mutation);
     }
 
     public function testResolveCreateTableAsSelectLowercaseSelectExtractsCorrectColumns(): void
@@ -2745,5 +2952,134 @@ final class PgSqlMutationResolverTest extends TestCase
         $rows = $shadowStore->get('users');
         self::assertNotEmpty($rows);
         self::assertSame('Bob', $rows[0]['name']);
+    }
+
+    public function testResolveUpsertUsesPartialIndexPredicateForConflictDetection(): void
+    {
+        $shadowStore = new ShadowStore();
+        $registry = new TableDefinitionRegistry();
+        $definition = new TableDefinition(
+            ['email', 'status', 'login_count'],
+            ['email' => 'TEXT', 'status' => 'TEXT', 'login_count' => 'INTEGER'],
+            [],
+            [],
+            [],
+        );
+        $registry->register('users', $definition->withPartialUniqueIndex(
+            new PartialUniqueIndex('users_active_email', ['email'], "status = 'active'::text"),
+        ));
+        $shadowStore->set('users', [
+            ['email' => 'alice@example.com', 'status' => 'inactive', 'login_count' => 2],
+            ['email' => 'alice@example.com', 'status' => 'active', 'login_count' => 5],
+        ]);
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            $registry,
+            new PgSqlSchemaParser(),
+            new PgSqlParser(),
+        );
+        $sql = "INSERT INTO users VALUES ('alice@example.com', 'active', 1) "
+            . "ON CONFLICT (email) WHERE status = 'active' "
+            . 'DO UPDATE SET login_count = users.login_count + EXCLUDED.login_count';
+
+        $mutation = $resolver->resolve($sql, 'INSERT', QueryKind::WRITE_SIMULATED);
+        self::assertInstanceOf(UpsertMutation::class, $mutation);
+        $mutation->apply($shadowStore, [[
+            'email' => 'alice@example.com',
+            'status' => 'active',
+            'login_count' => 1,
+        ]]);
+
+        self::assertSame([
+            ['email' => 'alice@example.com', 'status' => 'inactive', 'login_count' => 2],
+            ['email' => 'alice@example.com', 'status' => 'active', 'login_count' => 6],
+        ], $shadowStore->get('users'));
+    }
+
+    public function testUpdateDoesNotTreatRowsFromUnknownInsertAsSchema(): void
+    {
+        $shadowStore = new ShadowStore();
+        $shadowStore->insert('late_table', [['id' => 1, 'name' => 'Alice']]);
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            new TableDefinitionRegistry(),
+            new PgSqlSchemaParser(),
+            new PgSqlParser()
+        );
+
+        $this->expectException(UnknownSchemaException::class);
+        $resolver->resolve(
+            "UPDATE late_table SET name = 'Bob' WHERE id = 1",
+            'UPDATE',
+            QueryKind::WRITE_SIMULATED
+        );
+    }
+
+    public function testResolveMergeReturnsAtomicTableSynchronization(): void
+    {
+        $shadowStore = new ShadowStore();
+        $shadowStore->ensure('users');
+        $registry = new TableDefinitionRegistry();
+        $registry->register('users', new TableDefinition(
+            ['id', 'name'],
+            ['id' => 'INTEGER', 'name' => 'TEXT'],
+            ['id'],
+            ['id'],
+            [],
+        ));
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            $registry,
+            new PgSqlSchemaParser(),
+            new PgSqlParser(),
+        );
+
+        $mutation = $resolver->resolve(
+            'MERGE INTO users u USING source s ON u.id = s.id WHEN MATCHED THEN DELETE',
+            'MERGE',
+            QueryKind::WRITE_SIMULATED,
+        );
+
+        self::assertInstanceOf(SynchronizeMutation::class, $mutation);
+        self::assertSame('users', $mutation->tableName());
+    }
+
+    public function testResolveMergeAcceptsInitializedTableWithoutReflectedSchema(): void
+    {
+        $shadowStore = new ShadowStore();
+        $shadowStore->ensure('users');
+        $resolver = new PgSqlMutationResolver(
+            $shadowStore,
+            new TableDefinitionRegistry(),
+            new PgSqlSchemaParser(),
+            new PgSqlParser(),
+        );
+
+        $mutation = $resolver->resolve(
+            'MERGE INTO users u USING source s ON u.id = s.id WHEN MATCHED THEN DELETE',
+            'MERGE',
+            QueryKind::WRITE_SIMULATED,
+        );
+
+        self::assertInstanceOf(SynchronizeMutation::class, $mutation);
+        self::assertSame('users', $mutation->tableName());
+    }
+
+    public function testResolveMergeRejectsUnknownUninitializedTable(): void
+    {
+        $resolver = new PgSqlMutationResolver(
+            new ShadowStore(),
+            new TableDefinitionRegistry(),
+            new PgSqlSchemaParser(),
+            new PgSqlParser(),
+        );
+
+        $this->expectException(UnknownSchemaException::class);
+
+        $resolver->resolve(
+            'MERGE INTO users u USING source s ON u.id = s.id WHEN MATCHED THEN DELETE',
+            'MERGE',
+            QueryKind::WRITE_SIMULATED,
+        );
     }
 }

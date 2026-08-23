@@ -38,12 +38,17 @@ final class PgSqlCastRenderer implements CastRenderer
 
     private function mapToCastType(ColumnType $type): string
     {
+        $nativeType = trim($type->nativeType);
+        if (str_ends_with($nativeType, '[]')) {
+            return $nativeType;
+        }
+
         if ($type->family === ColumnTypeFamily::UNKNOWN) {
-            return $type->nativeType !== '' ? $type->nativeType : 'TEXT';
+            return $nativeType !== '' ? $nativeType : 'TEXT';
         }
 
         return match ($type->family) {
-            ColumnTypeFamily::INTEGER => 'INTEGER',
+            ColumnTypeFamily::INTEGER => $this->mapIntegerType($nativeType),
             ColumnTypeFamily::FLOAT => 'REAL',
             ColumnTypeFamily::DOUBLE => 'DOUBLE PRECISION',
             ColumnTypeFamily::DECIMAL => $this->extractDecimalType($type->nativeType),
@@ -56,6 +61,17 @@ final class PgSqlCastRenderer implements CastRenderer
             ColumnTypeFamily::TIMESTAMP => 'TIMESTAMP',
             ColumnTypeFamily::BINARY => 'BYTEA',
             ColumnTypeFamily::JSON => 'JSONB',
+        };
+    }
+
+    private function mapIntegerType(string $nativeType): string
+    {
+        $baseType = strtoupper((string) preg_replace('/\(.*\)/', '', $nativeType));
+
+        return match ($baseType) {
+            'INT2', 'SMALLINT', 'SMALLSERIAL' => 'SMALLINT',
+            'INT8', 'BIGINT', 'BIGSERIAL' => 'BIGINT',
+            default => 'INTEGER',
         };
     }
 
@@ -77,6 +93,10 @@ final class PgSqlCastRenderer implements CastRenderer
         $upper = strtoupper($nativeType);
         if (preg_match('/VARCHAR\((\d+)\)/', $upper, $matches) === 1) {
             return "VARCHAR({$matches[1]})";
+        }
+
+        if ($upper === 'VARCHAR' || $upper === 'CHARACTER VARYING') {
+            return 'VARCHAR';
         }
 
         return 'TEXT';

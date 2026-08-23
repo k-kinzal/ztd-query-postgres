@@ -47,6 +47,78 @@ final class PgSqlCastRendererTest extends CastRendererContractTest
         self::assertSame("CAST('42' AS INTEGER)", $renderer->renderCast("'42'", $type));
     }
 
+    public function testRenderCastBigIntPreservesWidth(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame(
+            'CAST(9223372036854775807 AS BIGINT)',
+            $renderer->renderCast('9223372036854775807', new ColumnType(ColumnTypeFamily::INTEGER, 'BIGINT')),
+        );
+    }
+
+    public function testRenderCastPreservesArrayType(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame(
+            "CAST('{1,2}' AS INT4[])",
+            $renderer->renderCast("'{1,2}'", new ColumnType(ColumnTypeFamily::INTEGER, 'INT4[]')),
+        );
+    }
+
+    public function testRenderCastTrimsArrayType(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame(
+            "CAST('{1,2}' AS INT4[])",
+            $renderer->renderCast("'{1,2}'", new ColumnType(ColumnTypeFamily::INTEGER, ' INT4[] ')),
+        );
+    }
+
+    public function testRenderCastPreservesInt2Alias(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame('CAST(1 AS SMALLINT)', $renderer->renderCast('1', new ColumnType(ColumnTypeFamily::INTEGER, 'int2')));
+    }
+
+    public function testRenderCastPreservesSmallIntAlias(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame('CAST(1 AS SMALLINT)', $renderer->renderCast('1', new ColumnType(ColumnTypeFamily::INTEGER, 'smallint')));
+    }
+
+    public function testRenderCastPreservesSmallSerialAlias(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame('CAST(1 AS SMALLINT)', $renderer->renderCast('1', new ColumnType(ColumnTypeFamily::INTEGER, 'smallserial')));
+    }
+
+    public function testRenderCastPreservesInt8Alias(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame('CAST(1 AS BIGINT)', $renderer->renderCast('1', new ColumnType(ColumnTypeFamily::INTEGER, 'int8')));
+    }
+
+    public function testRenderCastPreservesBigIntAlias(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame('CAST(1 AS BIGINT)', $renderer->renderCast('1', new ColumnType(ColumnTypeFamily::INTEGER, 'bigint')));
+    }
+
+    public function testRenderCastPreservesBigSerialAlias(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+
+        self::assertSame('CAST(1 AS BIGINT)', $renderer->renderCast('1', new ColumnType(ColumnTypeFamily::INTEGER, 'bigserial')));
+    }
+
     public function testRenderNullCastInteger(): void
     {
         $renderer = new PgSqlCastRenderer();
@@ -341,6 +413,20 @@ final class PgSqlCastRendererTest extends CastRendererContractTest
     {
         $renderer = new PgSqlCastRenderer();
         $type = new ColumnType(ColumnTypeFamily::STRING, 'VARCHAR');
+        self::assertSame("CAST('hi' AS VARCHAR)", $renderer->renderCast("'hi'", $type));
+    }
+
+    public function testRenderCastCharacterVaryingWithoutLength(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+        $type = new ColumnType(ColumnTypeFamily::STRING, 'CHARACTER VARYING');
+        self::assertSame("CAST('hi' AS VARCHAR)", $renderer->renderCast("'hi'", $type));
+    }
+
+    public function testRenderCastUnknownStringNativeTypeFallsBackToText(): void
+    {
+        $renderer = new PgSqlCastRenderer();
+        $type = new ColumnType(ColumnTypeFamily::STRING, 'CUSTOM_STRING');
         self::assertSame("CAST('hi' AS TEXT)", $renderer->renderCast("'hi'", $type));
     }
 

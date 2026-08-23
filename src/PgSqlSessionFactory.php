@@ -12,9 +12,11 @@ use ZtdQuery\Platform\Postgres\Transformer\SelectTransformer;
 use ZtdQuery\Platform\Postgres\Transformer\UpdateTransformer;
 use ZtdQuery\ResultSelectRunner;
 use ZtdQuery\Schema\TableDefinitionRegistry;
+use ZtdQuery\Schema\ViewDefinitionSet;
 use ZtdQuery\Session;
 use ZtdQuery\Platform\SessionFactory;
 use ZtdQuery\Shadow\ShadowStore;
+use ZtdQuery\Shadow\ShadowTransactionManager;
 
 /**
  * Factory for creating Session instances pre-configured for PostgreSQL.
@@ -38,6 +40,33 @@ final class PgSqlSessionFactory implements SessionFactory
                 $registry->register($tableName, $definition);
             }
         }
+        foreach ($reflector->partialUniqueIndexes() as $tableName => $indexes) {
+            $definition = $registry->get($tableName);
+            if ($definition === null) {
+                continue;
+            }
+            foreach ($indexes as $index) {
+                $definition = $definition->withPartialUniqueIndex($index);
+            }
+            $registry->register($tableName, $definition);
+        }
+        $partitionMetadata = (new PgSqlPartitionReflector($connection))->reflect();
+        foreach ($partitionMetadata['keys'] as $tableName => $partitionKey) {
+            $definition = $registry->get($tableName);
+            if ($definition !== null) {
+                $registry->register($tableName, $definition->withPartitionKey($partitionKey));
+            }
+        }
+        foreach ($partitionMetadata['relations'] as $tableName => $partitionRelation) {
+            $definition = $registry->get($tableName);
+            if ($definition !== null) {
+                $registry->register($tableName, $definition->withPartitionRelation($partitionRelation));
+            }
+        }
+        $views = new ViewDefinitionSet();
+        foreach ($reflector->reflectViews() as $viewName => $definition) {
+            $views->register($viewName, $definition);
+        }
 
         $guard = new PgSqlQueryGuard($parser);
         $selectTransformer = new SelectTransformer();
@@ -46,14 +75,19 @@ final class PgSqlSessionFactory implements SessionFactory
         $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
         $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
         $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
-        $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
+        $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser, $views);
 
         return new Session(
             $rewriter,
             $shadowStore,
             new ResultSelectRunner(),
             $config,
-            $connection
+            $connection,
+            transactions: new ShadowTransactionManager($shadowStore, $registry),
+            registry: $registry,
+            copySupport: new PgSqlCopySupport(),
+            parameterBindingCompiler: new PgSqlPdoParameterBindingCompiler(),
+            resultColumnTypeResolver: new PgSqlPdoResultColumnTypeResolver(),
         );
     }
 }

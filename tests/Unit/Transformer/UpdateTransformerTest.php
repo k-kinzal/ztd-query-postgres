@@ -17,11 +17,18 @@ use ZtdQuery\Platform\Postgres\PgSqlCastRenderer;
 use ZtdQuery\Platform\Postgres\PgSqlIdentifierQuoter;
 
 #[CoversClass(UpdateTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlSelectRelationParser::class)]
 #[UsesClass(PgSqlParser::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\PostgreSqlLexicalMasker::class)]
 #[UsesClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlTableSampleParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlTableSampleRewriter::class)]
 #[UsesClass(PgSqlCastRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlValueRenderer::class)]
 #[UsesClass(PgSqlIdentifierQuoter::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlGeneratedColumnProjector::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\PgSqlLexerProfile::class)]
 final class UpdateTransformerTest extends TestCase
 {
     public function testBuildProjectionSimpleUpdate(): void
@@ -113,12 +120,14 @@ final class UpdateTransformerTest extends TestCase
                     'id' => new ColumnType(ColumnTypeFamily::INTEGER, 'INTEGER'),
                     'name' => new ColumnType(ColumnTypeFamily::TEXT, 'TEXT'),
                 ],
+                'primaryKeys' => ['id'],
             ],
         ];
 
         $result = $transformer->transform($sql, $tables);
         self::assertStringContainsString('WITH', $result);
         self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+        self::assertStringContainsString('"users"."id" AS "__ztd_original_id"', $result);
     }
 
     public function testTransformThrowsOnUnresolvableTarget(): void

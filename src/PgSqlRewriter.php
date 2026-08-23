@@ -8,10 +8,14 @@ use ZtdQuery\Exception\UnknownSchemaException;
 use ZtdQuery\Exception\UnsupportedSqlException;
 use ZtdQuery\Rewrite\MultiRewritePlan;
 use ZtdQuery\Rewrite\QueryKind;
+use ZtdQuery\Rewrite\AffectedRowsMode;
 use ZtdQuery\Rewrite\RewritePlan;
 use ZtdQuery\Rewrite\SqlRewriter;
+use ZtdQuery\Rewrite\RewriteStateCommitter;
 use ZtdQuery\Schema\TableDefinitionRegistry;
+use ZtdQuery\Schema\ViewDefinitionSet;
 use ZtdQuery\Shadow\ShadowStore;
+use ZtdQuery\Sql\TransactionStatement;
 
 /**
  * PostgreSQL rewrite implementation for ZTD.
@@ -19,14 +23,23 @@ use ZtdQuery\Shadow\ShadowStore;
  * Orchestrates parsing, classification, transformation, and mutation resolution.
  * Uses Result Select Query approach (not RETURNING) for consistency across platforms.
  */
-final class PgSqlRewriter implements SqlRewriter
+final class PgSqlRewriter implements SqlRewriter, RewriteStateCommitter
 {
+    public function transactionStatement(string $sql): ?TransactionStatement
+    {
+        return (new PgSqlTransactionStatementParser())->parse($sql);
+    }
+
     private PgSqlQueryGuard $guard;
     private ShadowStore $shadowStore;
     private TableDefinitionRegistry $registry;
     private PgSqlTransformer $transformer;
     private PgSqlMutationResolver $mutationResolver;
     private PgSqlParser $parser;
+    private PgSqlReturningProjectionParser $returningProjectionParser;
+    private PgSqlCteShadowComposer $cteComposer;
+    private PgSqlPartitionPredicateRenderer $partitionPredicateRenderer;
+    private ViewDefinitionSet $views;
 
     public function __construct(
         PgSqlQueryGuard $guard,
@@ -34,7 +47,8 @@ final class PgSqlRewriter implements SqlRewriter
         TableDefinitionRegistry $registry,
         PgSqlTransformer $transformer,
         PgSqlMutationResolver $mutationResolver,
-        PgSqlParser $parser
+        PgSqlParser $parser,
+        ?ViewDefinitionSet $views = null,
     ) {
         $this->guard = $guard;
         $this->shadowStore = $shadowStore;
@@ -42,6 +56,10 @@ final class PgSqlRewriter implements SqlRewriter
         $this->transformer = $transformer;
         $this->mutationResolver = $mutationResolver;
         $this->parser = $parser;
+        $this->returningProjectionParser = new PgSqlReturningProjectionParser();
+        $this->cteComposer = new PgSqlCteShadowComposer();
+        $this->partitionPredicateRenderer = new PgSqlPartitionPredicateRenderer();
+        $this->views = $views ?? new ViewDefinitionSet();
     }
 
     /**
@@ -57,7 +75,7 @@ final class PgSqlRewriter implements SqlRewriter
             throw new UnsupportedSqlException($sql, 'Empty or unparseable');
         }
 
-        $statements = $this->parser->splitStatements($sql);
+        $statements = $this->splitStatements($sql);
         if ($statements === []) {
             throw new UnsupportedSqlException($sql, 'Empty or unparseable');
         }
@@ -82,7 +100,7 @@ final class PgSqlRewriter implements SqlRewriter
             throw new UnsupportedSqlException($sql, 'Empty or unparseable');
         }
 
-        $statements = $this->parser->splitStatements($sql);
+        $statements = $this->splitStatements($sql);
         if ($statements === []) {
             throw new UnsupportedSqlException($sql, 'Empty or unparseable');
         }
@@ -95,8 +113,22 @@ final class PgSqlRewriter implements SqlRewriter
         return new MultiRewritePlan($plans);
     }
 
+    /** {@inheritDoc} */
+    public function splitStatements(string $sql): array
+    {
+        return $this->parser->splitStatements($sql);
+    }
+
+    public function commitRewriteState(): void
+    {
+        $this->transformer->commitRewriteState();
+    }
+
     private function rewriteStatement(string $sql): RewritePlan
     {
+        if (PgSqlReadOnlyDiagnosticStatement::isSafe($sql)) {
+            return new RewritePlan($sql, QueryKind::READ);
+        }
         $kind = $this->guard->classify($sql);
         if ($kind === null) {
             throw new UnsupportedSqlException($sql, 'Statement type not supported');
@@ -106,13 +138,20 @@ final class PgSqlRewriter implements SqlRewriter
             return new RewritePlan($sql, QueryKind::SKIPPED);
         }
 
-        $tableContext = $this->buildTableContext();
         $statementType = $this->parser->classifyStatement($sql);
+        if ($statementType === 'DO') {
+            return new RewritePlan($sql, QueryKind::READ);
+        }
+        $tableContext = $this->buildTableContext();
 
         if ($kind === QueryKind::READ) {
             if ($this->hasSchemaContext()) {
                 $tableNames = $this->parser->extractSelectTableNames($sql);
+                $declaredCtes = array_fill_keys($this->cteComposer->declaredCteNames($sql), true);
                 foreach ($tableNames as $tableName) {
+                    if (isset($declaredCtes[strtolower($tableName)])) {
+                        continue;
+                    }
                     if (!$this->tableExists($tableName)) {
                         throw new UnknownSchemaException($sql, $tableName, 'table');
                     }
@@ -136,31 +175,38 @@ final class PgSqlRewriter implements SqlRewriter
                 }
             }
 
-            return new RewritePlan('SELECT 1 WHERE FALSE', QueryKind::DDL_SIMULATED, $mutation);
-        }
-
-        if ($statementType === 'UPDATE' || $statementType === 'DELETE') {
-            $this->ensureDmlTarget($sql, $statementType);
+            return new RewritePlan($this->emptyResultSelect(), QueryKind::DDL_SIMULATED, $mutation);
         }
 
         $mutation = $this->mutationResolver->resolve($sql, $statementType ?? '', $kind);
 
         if ($statementType === 'TRUNCATE') {
-            return new RewritePlan('SELECT 1 WHERE FALSE', QueryKind::WRITE_SIMULATED, $mutation);
+            return new RewritePlan($this->emptyResultSelect(), QueryKind::WRITE_SIMULATED, $mutation);
         }
 
         $transformedSql = $this->transformer->transform($sql, $tableContext);
 
-        return new RewritePlan($transformedSql, QueryKind::WRITE_SIMULATED, $mutation);
+        return new RewritePlan(
+            $transformedSql,
+            QueryKind::WRITE_SIMULATED,
+            $mutation,
+            $this->returningProjectionParser->parse($sql),
+            $statementType === 'MERGE' ? AffectedRowsMode::Changed : AffectedRowsMode::Matched,
+        );
     }
 
     /**
      * Build the table context map for transformers.
      *
-     * @return array<string, array{
+     * @return array<string, array{viewSql: string}|array{
      *     rows: array<int, array<string, mixed>>,
      *     columns: array<int, string>,
-     *     columnTypes: array<string, \ZtdQuery\Schema\ColumnType>
+     *     columnTypes: array<string, \ZtdQuery\Schema\ColumnType>,
+     *     columnDefaults: array<string, string>,
+     *     identityStrategies: array<string, \ZtdQuery\Schema\IdentityGenerationStrategy>,
+     *     generatedExpressions: array<string, string>,
+     *     sourceSql?: string,
+     *     storageTable?: string
      * }>
      */
     private function buildTableContext(): array
@@ -183,11 +229,20 @@ final class PgSqlRewriter implements SqlRewriter
             }
 
             $columnTypes = $definition !== null ? $definition->typedColumns : [];
+            $columnDefaults = $definition !== null ? $definition->columnDefaults : [];
+            $identityStrategies = $definition !== null ? $definition->identityStrategies : [];
+            $generatedExpressions = $definition !== null ? $definition->generatedExpressions : [];
 
             $context[$tableName] = [
                 'rows' => $rows,
                 'columns' => $columns ?? [],
                 'columnTypes' => $columnTypes,
+                'columnDefaults' => $columnDefaults,
+                'identityStrategies' => $identityStrategies,
+                'generatedExpressions' => $generatedExpressions,
+                'primaryKeys' => $definition !== null ? $definition->primaryKeys : [],
+                'candidateKeys' => $definition !== null ? $definition->candidateKeys()->keys() : [],
+                'partialUniqueIndexes' => $definition !== null ? $definition->partialUniqueIndexes : [],
             ];
         }
 
@@ -197,40 +252,87 @@ final class PgSqlRewriter implements SqlRewriter
                 continue;
             }
 
-            $context[$tableName] = [
+            $definitionContext = [
                 'rows' => [],
                 'columns' => $definition->columns,
                 'columnTypes' => $definition->typedColumns,
+                'columnDefaults' => $definition->columnDefaults,
+                'identityStrategies' => $definition->identityStrategies,
+                'generatedExpressions' => $definition->generatedExpressions,
+                'primaryKeys' => $definition->primaryKeys,
+                'candidateKeys' => $definition->candidateKeys()->keys(),
             ];
+            $definitionContext['partialUniqueIndexes'] = $definition->partialUniqueIndexes;
+            $context[$tableName] = $definitionContext;
+        }
+
+        $quoter = new PgSqlIdentifierQuoter();
+        foreach ($allDefinitions as $tableName => $definition) {
+            $relation = $definition->partitionRelation;
+            if ($relation === null) {
+                continue;
+            }
+
+            $siblingPredicates = [];
+            foreach ($allDefinitions as $siblingDefinition) {
+                $sibling = $siblingDefinition->partitionRelation;
+                if ($sibling !== null
+                    && strcasecmp($sibling->parentTable, $relation->parentTable) === 0
+                    && $sibling->predicate !== null
+                ) {
+                    $siblingPredicates[] = $sibling->predicate;
+                }
+            }
+            $predicate = $this->partitionPredicateRenderer->render($relation, $siblingPredicates);
+            $storageTable = $this->storageTable($tableName);
+            $partitionContext = $context[$tableName] ?? null;
+            if ($partitionContext === null) {
+                continue;
+            }
+            $partitionContext['rows'] = $this->shadowStore->get($storageTable);
+            $partitionContext['storageTable'] = $storageTable;
+            $partitionContext['sourceSql'] = 'SELECT * FROM '
+                . $quoter->quote($relation->parentTable)
+                . " WHERE $predicate";
+            $context[$tableName] = $partitionContext;
+        }
+
+        foreach ((new PgSqlViewShadowRenderer())->render($this->views, array_keys($context)) as $viewName => $viewSql) {
+            if (isset($context[$viewName])) {
+                continue;
+            }
+            $context[$viewName] = ['viewSql' => $viewSql];
         }
 
         return $context;
     }
 
-    private function ensureDmlTarget(string $sql, string $statementType): void
+    private function storageTable(string $tableName): string
     {
-        if ($statementType === 'UPDATE') {
-            $targetTable = $this->parser->extractUpdateTable($sql);
-            if ($targetTable !== null) {
-                $this->shadowStore->ensure($targetTable);
+        $seen = [];
+        while (!in_array($tableName, $seen, true)) {
+            $seen[] = $tableName;
+            $parent = $this->registry->get($tableName)?->partitionRelation?->parentTable;
+            if ($parent === null) {
+                return $tableName;
             }
+            $tableName = $parent;
         }
 
-        if ($statementType === 'DELETE') {
-            $targetTable = $this->parser->extractDeleteTable($sql);
-            if ($targetTable !== null) {
-                $this->shadowStore->ensure($targetTable);
-            }
-        }
+        return $tableName;
     }
 
     private function tableExists(string $tableName): bool
     {
-        if ($this->shadowStore->get($tableName) !== []) {
+        if ($this->shadowStore->has($tableName)) {
             return true;
         }
 
         if ($this->registry->has($tableName)) {
+            return true;
+        }
+
+        if ($this->views->has($tableName)) {
             return true;
         }
 
@@ -247,6 +349,15 @@ final class PgSqlRewriter implements SqlRewriter
             return true;
         }
 
+        if ($this->views->hasAnyViews()) {
+            return true;
+        }
+
         return false;
+    }
+
+    public function emptyResultSelect(): string
+    {
+        return 'SELECT 1 WHERE FALSE';
     }
 }
