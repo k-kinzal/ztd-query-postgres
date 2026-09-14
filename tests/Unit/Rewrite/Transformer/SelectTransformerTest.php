@@ -1,0 +1,490 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Unit\Rewrite\Transformer;
+
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\UsesClass;
+use RuntimeException;
+use stdClass;
+use ZtdQuery\Platform\Postgres\Rewrite\Sampling\PgSqlTableSampleRewriter;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\SelectTransformer;
+use ZtdQuery\Platform\Postgres\Sql\PgSqlIdentifierQuoter;
+use ZtdQuery\Platform\Postgres\Sql\Sampling\PgSqlTableSample;
+use ZtdQuery\Platform\Postgres\Sql\Sampling\PgSqlTableSampleParser;
+use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
+use ZtdQuery\Platform\ValueRenderer;
+use ZtdQuery\Schema\ColumnDeclaration;
+use ZtdQuery\Schema\ColumnTypeFamily;
+
+#[CoversClass(SelectTransformer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Relation\PgSqlSelectRelationParser::class)]
+#[UsesClass(PgSqlCastRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Value\PgSqlValueRenderer::class)]
+#[UsesClass(PgSqlIdentifierQuoter::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Cte\PgSqlCteShadowComposer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\GeneratedColumn\PgSqlGeneratedColumnProjector::class)]
+#[UsesClass(PgSqlTableSampleParser::class)]
+#[UsesClass(PgSqlTableSampleRewriter::class)]
+#[UsesClass(PgSqlTableSample::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\PgSqlLexerProfile::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Rewrite\Transformer\Cte\RowSourceRenderer::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Cte\HeaderParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Cte\IdentifierReferences::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Cte\PrefixMerge::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Cte\ShadowDependencies::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Relation\FromClause::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Relation\RelationReference::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Sampling\SampleClause::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Sampling\SampleTokens::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Sampling\PgSqlTableSampleMethod::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Sampling\SampleProjection::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Sampling\TableColumns::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Value\CastTypeMapper::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Value\NativeCastTarget::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Value\BinaryStream::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Value\LiteralText::class)]
+final class SelectTransformerTest extends \PHPUnit\Framework\TestCase
+{
+    public function testEmptyTableContextReturnsOriginalSql(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $result = $transformer->transform($sql, []);
+        self::assertSame($sql, $result);
+    }
+
+    public function testCteInjectedSqlStartsWithWith(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result = $transformer->transform($sql, $tables);
+        self::assertStringStartsWith('WITH', ltrim($result));
+    }
+
+    public function testTableNameUsedAsCte(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result = $transformer->transform($sql, $tables);
+        self::assertStringContainsString('users', $result);
+        self::assertStringContainsString('SELECT', strtoupper($result));
+    }
+
+    public function testTransformIsDeterministic(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result1 = $transformer->transform($sql, $tables);
+        $result2 = $transformer->transform($sql, $tables);
+        self::assertSame($result1, $result2);
+    }
+
+    public function testTransformOutputIsNonEmpty(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result = $transformer->transform($sql, $tables);
+        self::assertNotEmpty($result);
+    }
+
+    public function testCteContainsSelectUnionStructure(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com'], ['id' => 2, 'name' => 'Bob', 'email' => 'bob@example.com']], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result = $transformer->transform($sql, $tables);
+        $upper = strtoupper($result);
+        self::assertTrue(str_contains($upper, 'UNION ALL') || str_contains($upper, 'VALUES'), 'Multiple data rows should produce UNION ALL or VALUES in the CTE, got: ' . $result);
+        self::assertStringContainsString('SELECT', $upper);
+        self::assertStringContainsString(' AS ', $upper, 'CTE must contain AS keyword');
+    }
+
+    public function testCteContainsCastExpressions(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice', 'email' => 'alice@example.com']], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result = $transformer->transform($sql, $tables);
+        $upper = strtoupper($result);
+        self::assertStringContainsString('CAST(', $upper, 'CTE output must contain CAST expressions for typed columns');
+    }
+
+    public function testEmptyRowsWithColumnsReturnsWithClause(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT * FROM users WHERE id = 1';
+        $tables = ['users' => ['rows' => [], 'columns' => ['id', 'name', 'email'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT'), 'email' => new ColumnDeclaration(ColumnTypeFamily::STRING, 'TEXT')]]];
+        $result = $transformer->transform($sql, $tables);
+        self::assertStringStartsWith('WITH', ltrim($result));
+        self::assertNotEmpty($result);
+    }
+    public function testTableSampleReadsFromGeneratedShadowCte(): void
+    {
+        $result = (new SelectTransformer())->transform('SELECT id FROM data TABLESAMPLE BERNOULLI (100)', ['data' => ['rows' => [['id' => 1], ['id' => 2]], 'columns' => ['id'], 'columnTypes' => []]]);
+        self::assertStringStartsWith('WITH "data" AS MATERIALIZED', $result);
+        self::assertStringNotContainsString('TABLESAMPLE', $result);
+        self::assertStringContainsString('FROM data)', $result);
+    }
+    public function testGeneratedColumnsAreRecomputedFromBaseRow(): void
+    {
+        $result = (new SelectTransformer())->transform('SELECT total FROM orders', ['orders' => ['rows' => [['qty' => 5, 'unit_price' => 10, 'total' => null]], 'columns' => ['qty', 'unit_price', 'total'], 'columnTypes' => [], 'generatedExpressions' => ['total' => '(qty * unit_price)']]]);
+        self::assertStringContainsString('(qty * unit_price) AS "total"', $result);
+        self::assertStringContainsString('AS "__ztd_generated_source"', $result);
+    }
+    public function testTransformMaterializesViewAfterItsShadowTable(): void
+    {
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => []], 'active_users' => ['viewSql' => 'SELECT * FROM users WHERE id > 0'], 'active_user_count' => ['viewSql' => 'SELECT count(*) AS total FROM active_users']];
+        self::assertSame("WITH \"users\" AS MATERIALIZED (SELECT CAST(1 AS INTEGER) AS \"id\"),\n\"active_users\" AS MATERIALIZED (SELECT * FROM users WHERE id > 0),\n\"active_user_count\" AS MATERIALIZED (SELECT count(*) AS total FROM active_users)\nSELECT * FROM active_user_count", (new SelectTransformer())->transform('SELECT * FROM active_user_count', $tables));
+    }
+    public function testUsesInjectedValueRenderer(): void
+    {
+        $valueRenderer = self::createStub(ValueRenderer::class);
+        $valueRenderer->method('renderValue')->willReturn('CUSTOM_VALUE');
+        $transformer = new SelectTransformer(null, null, $valueRenderer);
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => []]];
+        self::assertStringContainsString('CUSTOM_VALUE', $transformer->transform('SELECT * FROM users', $tables));
+    }
+    public function testTransformWithNoTablesReturnsOriginal(): void
+    {
+        $transformer = new SelectTransformer();
+        $sql = 'SELECT 1';
+        self::assertSame($sql, $transformer->transform($sql, []));
+    }
+    public function testTransformWithEmptyShadowGeneratesEmptyCte(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('WHERE FALSE', $result);
+        self::assertStringContainsString('AS MATERIALIZED', $result);
+        self::assertStringContainsString('"users"', $result);
+        self::assertStringContainsString('CAST(NULL AS INTEGER)', $result);
+        self::assertStringContainsString('CAST(NULL AS TEXT)', $result);
+    }
+    public function testTransformWithSingleRowUsesSingleSelect(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('AS MATERIALIZED', $result);
+        self::assertStringNotContainsString('VALUES', $result);
+        self::assertStringContainsString('"id"', $result);
+        self::assertStringContainsString('"name"', $result);
+    }
+    public function testTransformWithMultiRowUsesValuesClause(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice'], ['id' => 2, 'name' => 'Bob']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('VALUES', $result);
+        self::assertStringContainsString('AS MATERIALIZED', $result);
+    }
+    public function testTransformUsesDoubleQuoteIdentifiers(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('"users"', $result);
+        self::assertStringContainsString('"id"', $result);
+        self::assertStringNotContainsString('`', $result);
+    }
+    public function testTransformDoesNotShadowUnreferencedTables(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]], 'orders' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('"users"', $result);
+        self::assertStringNotContainsString('"orders"', $result);
+    }
+    public function testTransformPreservesExistingWithClause(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $sql = 'WITH cte AS (SELECT 1) SELECT * FROM users, cte';
+        $result = $transformer->transform($sql, $tables);
+        self::assertStringContainsString('WITH', $result);
+        self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+    }
+    public function testTransformUsesPostgresqlCastTypes(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['test' => ['rows' => [], 'columns' => ['a', 'b', 'c', 'd', 'e'], 'columnTypes' => ['a' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'b' => new ColumnDeclaration(ColumnTypeFamily::BOOLEAN, 'BOOLEAN'), 'c' => new ColumnDeclaration(ColumnTypeFamily::TIMESTAMP, 'TIMESTAMP'), 'd' => new ColumnDeclaration(ColumnTypeFamily::JSON, 'JSONB'), 'e' => new ColumnDeclaration(ColumnTypeFamily::BINARY, 'BYTEA')]]];
+        $result = $transformer->transform('SELECT * FROM test', $tables);
+        self::assertStringContainsString('CAST(NULL AS INTEGER)', $result);
+        self::assertStringContainsString('CAST(NULL AS BOOLEAN)', $result);
+        self::assertStringContainsString('CAST(NULL AS TIMESTAMP)', $result);
+        self::assertStringContainsString('CAST(NULL AS JSONB)', $result);
+        self::assertStringContainsString('CAST(NULL AS BYTEA)', $result);
+    }
+    public function testTransformNullValues(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => null]], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('NULL', $result);
+        self::assertStringNotContainsString("'NULL'", $result);
+    }
+    public function testTransformSingleQuoteInData(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => "O'Brien"]], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString("O''Brien", $result);
+    }
+    public function testTransformEmptyStringData(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => '']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString("''", $result);
+    }
+    public function testTransformBooleanValues(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['flags' => ['rows' => [['id' => 1, 'active' => true], ['id' => 2, 'active' => false]], 'columns' => ['id', 'active'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'active' => new ColumnDeclaration(ColumnTypeFamily::BOOLEAN, 'BOOLEAN')]]];
+        $result = $transformer->transform('SELECT * FROM flags', $tables);
+        self::assertStringContainsString('VALUES', $result);
+        self::assertStringContainsString('"flags"', $result);
+    }
+    public function testTransformAllNullRow(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => null, 'name' => null]], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('"users"', $result);
+        self::assertStringContainsString('AS MATERIALIZED', $result);
+    }
+    public function testTransformWithNoFromDual(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringNotContainsString('DUAL', $result);
+        self::assertStringContainsString('WHERE FALSE', $result);
+    }
+    public function testTransformExactOutputEmptyRows(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertSame('WITH "users" AS MATERIALIZED (SELECT CAST(NULL AS INTEGER) AS "id", CAST(NULL AS TEXT) AS "name" WHERE FALSE)' . "\n" . 'SELECT * FROM users', $result);
+    }
+    public function testTransformExactOutputSingleRow(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertSame("WITH \"users\" AS MATERIALIZED (SELECT CAST('1' AS INTEGER) AS \"id\", CAST('Alice' AS TEXT) AS \"name\")\nSELECT * FROM users", $result);
+    }
+    public function testTransformExactOutputMultiRow(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice'], ['id' => 2, 'name' => 'Bob']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        $expected = "WITH \"users\" AS MATERIALIZED (\n" . "  SELECT * FROM (VALUES\n" . "    (CAST('1' AS INTEGER), CAST('Alice' AS TEXT)),\n" . "    (CAST('2' AS INTEGER), CAST('Bob' AS TEXT))\n" . "  ) AS t(\"id\", \"name\")\n" . ")\nSELECT * FROM users";
+        self::assertSame($expected, $result);
+    }
+    public function testTransformExactOutputWithExistingWith(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice']], 'columns' => ['id', 'name'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER'), 'name' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $sql = 'WITH cte AS (SELECT 1) SELECT * FROM users, cte';
+        $result = $transformer->transform($sql, $tables);
+        self::assertSame("WITH \"users\" AS MATERIALIZED (SELECT CAST('1' AS INTEGER) AS \"id\", CAST('Alice' AS TEXT) AS \"name\"),\n cte AS (SELECT 1) SELECT * FROM users, cte", $result);
+    }
+    public function testTransformWithCustomCastRendererAndQuoter(): void
+    {
+        $castRenderer = new PgSqlCastRenderer();
+        $quoter = new PgSqlIdentifierQuoter();
+        $transformer = new SelectTransformer($castRenderer, $quoter);
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertSame("WITH \"users\" AS MATERIALIZED (SELECT CAST('1' AS INTEGER) AS \"id\")\nSELECT * FROM users", $result);
+    }
+    public function testTransformTableNotReferencedInSql(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT 1', $tables);
+        self::assertSame('SELECT 1', $result);
+    }
+    public function testTransformEmptyColumnsAndEmptyRowsSkipsTable(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [], 'columns' => [], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertSame('SELECT * FROM users', $result);
+    }
+    public function testTransformEmptyColumnsWithRowsDerivesCols(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice']], 'columns' => [], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+        self::assertStringContainsString('"id"', $result);
+        self::assertStringContainsString('"name"', $result);
+    }
+    public function testTransformEmptyColumnsMultiRowsDerivesCols(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1, 'name' => 'Alice'], ['id' => 2, 'name' => 'Bob', 'extra' => 'x']], 'columns' => [], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+        self::assertStringContainsString('"id"', $result);
+        self::assertStringContainsString('"name"', $result);
+        self::assertStringContainsString('"extra"', $result);
+    }
+    public function testTransformWithIntValueNoColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 42]], 'columns' => ['id'], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('CAST(42 AS INTEGER)', $result);
+    }
+    public function testTransformWithStringValueNoColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['name' => 'Alice']], 'columns' => ['name'], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString("CAST('Alice' AS TEXT)", $result);
+    }
+    public function testTransformWithBoolValueNoColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['active' => true], ['active' => false]], 'columns' => ['active'], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('TRUE', $result);
+        self::assertStringContainsString('FALSE', $result);
+    }
+    public function testTransformWithFloatValueNoColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['score' => 3.14]], 'columns' => ['score'], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('3.14', $result);
+    }
+    public function testTransformWithBoolValueWithColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['active' => true]], 'columns' => ['active'], 'columnTypes' => ['active' => new ColumnDeclaration(ColumnTypeFamily::BOOLEAN, 'BOOLEAN')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString("CAST('1' AS BOOLEAN)", $result);
+    }
+    public function testTransformWithFloatValueWithColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['score' => 9.5]], 'columns' => ['score'], 'columnTypes' => ['score' => new ColumnDeclaration(ColumnTypeFamily::DECIMAL, 'NUMERIC')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString("CAST('9.5' AS NUMERIC)", $result);
+    }
+    public function testTransformWithUnknownColumnTypeUsesTextFallback(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [], 'columns' => ['data'], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('CAST(NULL AS TEXT)', $result);
+    }
+    public function testTransformWithMultipleTablesOnlyReferencedAreIncluded(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]], 'orders' => ['rows' => [['id' => 10]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM users JOIN orders ON users.id = orders.id', $tables);
+        self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+        self::assertStringContainsString('"orders" AS MATERIALIZED', $result);
+    }
+    public function testTransformContinueVsBreakMultipleTables(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['not_referenced' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]], 'users' => ['rows' => [['id' => 2]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+        self::assertStringNotContainsString('"not_referenced"', $result);
+    }
+    public function testTransformUnsupportedValueTypeThrows(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['data' => [1, 2, 3]]], 'columns' => ['data'], 'columnTypes' => []]];
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('Unsupported value type for CTE shadowing');
+        $transformer->transform('SELECT * FROM users', $tables);
+    }
+    public function testTransformObjectWithToStringNoColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $obj = new class () {
+            public function __toString(): string
+            {
+                return 'stringified';
+            }
+        };
+        $tables = ['users' => ['rows' => [['val' => $obj]], 'columns' => ['val'], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('stringified', $result);
+    }
+    public function testTransformSerializesObjectWithColumnType(): void
+    {
+        $transformer = new SelectTransformer();
+        $obj = new stdClass();
+        $tables = ['users' => ['rows' => [['val' => $obj]], 'columns' => ['val'], 'columnTypes' => ['val' => new ColumnDeclaration(ColumnTypeFamily::TEXT, 'TEXT')]]];
+        $result = $transformer->transform('SELECT * FROM users', $tables);
+        self::assertStringContainsString('CAST(', $result);
+    }
+    public function testTransformWithLeadingCommentAndWith(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $sql = '/* comment */WITH cte AS (SELECT 1) SELECT * FROM users, cte';
+        $result = $transformer->transform($sql, $tables);
+        self::assertStringStartsWith('/* comment */WITH "users"', $result);
+    }
+    public function testTransformBoolTrueAndFalseDistinct(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['flags' => ['rows' => [['active' => true]], 'columns' => ['active'], 'columnTypes' => []]];
+        $resultTrue = $transformer->transform('SELECT * FROM flags', $tables);
+        self::assertStringContainsString('TRUE', $resultTrue);
+        self::assertStringNotContainsString('FALSE', $resultTrue);
+        $tables['flags']['rows'] = [['active' => false]];
+        $resultFalse = $transformer->transform('SELECT * FROM flags', $tables);
+        self::assertStringContainsString('FALSE', $resultFalse);
+        self::assertStringNotContainsString('TRUE', $resultFalse);
+    }
+    public function testTransformEmptyColumnsAndEmptyRowsSkipsButContinuesToNext(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['empty_table' => ['rows' => [], 'columns' => [], 'columnTypes' => []], 'users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $result = $transformer->transform('SELECT * FROM empty_table, users', $tables);
+        self::assertStringContainsString('"users" AS MATERIALIZED', $result);
+        self::assertStringNotContainsString('"empty_table" AS MATERIALIZED', $result);
+    }
+    public function testTransformPregReplaceCountOnlyOnce(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['users' => ['rows' => [['id' => 1]], 'columns' => ['id'], 'columnTypes' => ['id' => new ColumnDeclaration(ColumnTypeFamily::INTEGER, 'INTEGER')]]];
+        $sql = 'WITH a AS (SELECT 1) SELECT * FROM users WHERE id IN (WITH b AS (SELECT 2) SELECT * FROM b)';
+        $result = $transformer->transform($sql, $tables);
+        $withCount = substr_count($result, 'WITH');
+        self::assertSame(2, $withCount);
+    }
+    public function testTransformEmptyColumnsWithMultipleRowsDifferentKeys(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['data' => ['rows' => [['a' => 1], ['a' => 2, 'b' => 3]], 'columns' => [], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM data', $tables);
+        self::assertStringContainsString('"a"', $result);
+        self::assertStringContainsString('"b"', $result);
+    }
+    public function testTransformEmptyColumnsDerivesColumnsNotIncludingDuplicates(): void
+    {
+        $transformer = new SelectTransformer();
+        $tables = ['data' => ['rows' => [['x' => 1, 'y' => 2], ['x' => 3, 'y' => 4]], 'columns' => [], 'columnTypes' => []]];
+        $result = $transformer->transform('SELECT * FROM data', $tables);
+        self::assertSame(1, substr_count($result, '"x"'));
+    }
+}

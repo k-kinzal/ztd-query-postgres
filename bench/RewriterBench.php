@@ -4,16 +4,17 @@ declare(strict_types=1);
 
 namespace Bench;
 
-use ZtdQuery\Platform\Postgres\PgSqlMutationResolver;
-use ZtdQuery\Platform\Postgres\PgSqlParser;
-use ZtdQuery\Platform\Postgres\PgSqlQueryGuard;
-use ZtdQuery\Platform\Postgres\PgSqlRewriter;
-use ZtdQuery\Platform\Postgres\PgSqlSchemaParser;
-use ZtdQuery\Platform\Postgres\PgSqlTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\DeleteTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\InsertTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\SelectTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\UpdateTransformer;
+use PhpBench\Attributes as Bench;
+use ZtdQuery\Platform\Postgres\Rewrite\PgSqlQueryGuard;
+use ZtdQuery\Platform\Postgres\Rewrite\PgSqlRewriter;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\DeleteTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\InsertTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\PgSqlTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\SelectTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\UpdateTransformer;
+use ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser;
+use ZtdQuery\Platform\Postgres\Shadow\PgSqlMutationResolver;
+use ZtdQuery\Platform\Postgres\Sql\PgSqlParser;
 use ZtdQuery\Schema\TableDefinition;
 use ZtdQuery\Schema\TableDefinitionRegistry;
 use ZtdQuery\Shadow\ShadowStore;
@@ -66,21 +67,15 @@ final class RewriterBench
         );
     }
 
-    /**
-     * @BeforeMethods({"setUp"})
-     * @Revs(100)
-     * @Iterations(5)
-     */
+    #[Bench\BeforeMethods('setUp')]
+    #[Bench\Revs(100)]
     public function benchRewriteSelect(): void
     {
         $this->rewriter->rewrite($this->selectSql);
     }
 
-    /**
-     * @BeforeMethods({"setUp"})
-     * @Revs(100)
-     * @Iterations(5)
-     */
+    #[Bench\BeforeMethods('setUp')]
+    #[Bench\Revs(100)]
     public function benchRewriteInsert(): void
     {
         $this->rewriter->rewrite($this->insertSql);

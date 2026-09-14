@@ -5,26 +5,26 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use Override;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\PostgreSqlProvider;
 use ZtdQuery\Exception\UnknownSchemaException;
 use ZtdQuery\Exception\UnsupportedSqlException;
-use ZtdQuery\Platform\Postgres\PgSqlCastRenderer;
-use ZtdQuery\Platform\Postgres\PgSqlIdentifierQuoter;
-use ZtdQuery\Platform\Postgres\PgSqlMutationResolver;
-use ZtdQuery\Platform\Postgres\PgSqlParser;
-use ZtdQuery\Platform\Postgres\PgSqlQueryGuard;
-use ZtdQuery\Platform\Postgres\PgSqlRewriter;
-use ZtdQuery\Platform\Postgres\PgSqlSchemaParser;
-use ZtdQuery\Platform\Postgres\PgSqlTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\DeleteTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\InsertTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\SelectTransformer;
-use ZtdQuery\Platform\Postgres\Transformer\UpdateTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\PgSqlQueryGuard;
+use ZtdQuery\Platform\Postgres\Rewrite\PgSqlRewriter;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\DeleteTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\InsertTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\PgSqlTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\SelectTransformer;
+use ZtdQuery\Platform\Postgres\Rewrite\Transformer\UpdateTransformer;
+use ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser;
+use ZtdQuery\Platform\Postgres\Shadow\PgSqlMutationResolver;
+use ZtdQuery\Platform\Postgres\Sql\PgSqlIdentifierQuoter;
+use ZtdQuery\Platform\Postgres\Sql\PgSqlParser;
+use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
 use ZtdQuery\Rewrite\QueryKind;
-use ZtdQuery\Schema\TableDefinition;
 use ZtdQuery\Schema\TableDefinitionRegistry;
 use ZtdQuery\Shadow\ShadowStore;
 
@@ -47,77 +47,23 @@ use ZtdQuery\Shadow\ShadowStore;
 final class FullPipelineFuzzTest extends TestCase
 {
     private const ITERATIONS = 50;
-
     private PgSqlSchemaParser $schemaParser;
-
     private PostgreSqlProvider $provider;
-
     private \Faker\Generator $faker;
-
+    #[Override]
     protected function setUp(): void
     {
         $this->schemaParser = new PgSqlSchemaParser();
         $this->faker = Factory::create();
         $this->faker->seed(20260815);
-        $this->provider = new PostgreSqlProvider($this->faker);
+        $this->provider = new PostgreSqlProvider($this->faker, 'pg-17.2');
     }
+
+
 
     /**
-     * Build a fresh rewriter with given registry and shadow store.
+     * Test create table then select does not crash.
      */
-    private function buildRewriter(ShadowStore $shadowStore, TableDefinitionRegistry $registry): PgSqlRewriter
-    {
-        $parser = new PgSqlParser();
-        $guard = new PgSqlQueryGuard($parser);
-        $castRenderer = new PgSqlCastRenderer();
-        $quoter = new PgSqlIdentifierQuoter();
-        $selectTransformer = new SelectTransformer($castRenderer, $quoter);
-        $insertTransformer = new InsertTransformer($parser, $selectTransformer);
-        $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
-        $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
-        $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
-        $schemaParser = new PgSqlSchemaParser();
-        $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
-
-        return new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
-    }
-
-    /**
-     * Generate random fixture rows for a table definition.
-     *
-     * @return array<int, array<string, mixed>>
-     */
-    private function generateFixtureRows(TableDefinition $definition, int $count): array
-    {
-        $rows = [];
-        for ($i = 0; $i < $count; $i++) {
-            $row = [];
-            foreach ($definition->columns as $col) {
-                $type = strtoupper($definition->columnTypes[$col] ?? 'TEXT');
-                $row[$col] = $this->generateValueForType($type, $i);
-            }
-            $rows[] = $row;
-        }
-
-        return $rows;
-    }
-
-    /**
-     * Generate a random value appropriate for the given SQL type.
-     */
-    private function generateValueForType(string $type, int $seed): int|float|string|bool
-    {
-        $baseType = preg_replace('/\(.*\)/', '', $type);
-        $baseType = trim($baseType ?? $type);
-
-        return match (true) {
-            in_array($baseType, ['INT', 'INT2', 'INT4', 'INT8', 'INTEGER', 'SMALLINT', 'BIGINT', 'SERIAL', 'SMALLSERIAL', 'BIGSERIAL'], true) => $seed + 1,
-            in_array($baseType, ['REAL', 'FLOAT4', 'DOUBLE PRECISION', 'FLOAT8', 'DECIMAL', 'NUMERIC'], true) => round($seed + 0.5, 2),
-            in_array($baseType, ['BOOLEAN', 'BOOL'], true) => $seed % 2 === 0,
-            default => 'val_' . $seed,
-        };
-    }
-
     public function testCreateTableThenSelectDoesNotCrash(): void
     {
         $this->faker->seed(20260815);
@@ -127,35 +73,42 @@ final class FullPipelineFuzzTest extends TestCase
             if ($definition === null || $definition->columns === []) {
                 continue;
             }
-
             $shadowStore = new ShadowStore();
             $registry = new TableDefinitionRegistry();
-
-            $tableName = $this->extractTableName($createSql);
+            $tableName = (new Input\SchemaRows())->extractTableName($createSql);
             if ($tableName === null) {
                 continue;
             }
-
             $registry->register($tableName, $definition);
-            $fixtureRows = $this->generateFixtureRows($definition, $this->faker->numberBetween(0, 5));
+            $fixtureRows = (new Input\SchemaRows())->generateFixtureRows($definition, $this->faker->numberBetween(0, 5));
             $shadowStore->set($tableName, $fixtureRows);
-
-            $rewriter = $this->buildRewriter($shadowStore, $registry);
-
-            $selectSql = 'SELECT * FROM ' . $this->quoteIdentifier($tableName);
+            $parser = new PgSqlParser();
+            $guard = new PgSqlQueryGuard($parser);
+            $castRenderer = new PgSqlCastRenderer();
+            $quoter = new PgSqlIdentifierQuoter();
+            $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+            $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+            $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+            $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+            $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+            $schemaParser = new PgSqlSchemaParser();
+            $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
+            $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
+            $selectSql = 'SELECT * FROM ' . (new PgSqlIdentifierQuoter())->quote($tableName);
             try {
                 $plan = $rewriter->rewrite($selectSql);
                 self::assertNotEmpty($plan->sql());
                 self::assertSame(QueryKind::READ, $plan->kind());
                 self::assertNull($plan->mutation());
             } catch (UnsupportedSqlException|UnknownSchemaException) {
-            } catch (\Throwable $e) {
-                self::fail("Full pipeline SELECT crashed on iteration $i\nCREATE: $createSql\nSELECT: $selectSql\nError: " . $e->getMessage());
+                continue;
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Test create table then insert does not crash.
+     */
     public function testCreateTableThenInsertDoesNotCrash(): void
     {
         $this->faker->seed(20260815);
@@ -165,49 +118,49 @@ final class FullPipelineFuzzTest extends TestCase
             if ($definition === null || $definition->columns === []) {
                 continue;
             }
-
             $shadowStore = new ShadowStore();
             $registry = new TableDefinitionRegistry();
-
-            $tableName = $this->extractTableName($createSql);
+            $tableName = (new Input\SchemaRows())->extractTableName($createSql);
             if ($tableName === null) {
                 continue;
             }
-
             $registry->register($tableName, $definition);
             $shadowStore->set($tableName, []);
-
-            $rewriter = $this->buildRewriter($shadowStore, $registry);
-
-            $values = $this->buildInsertValues($definition);
-            $insertSql = 'INSERT INTO ' . $this->quoteIdentifier($tableName) . ' (' . implode(', ', array_map(fn (string $c) => $this->quoteIdentifier($c), $definition->columns)) . ') VALUES (' . $values . ')';
-
+            $parser = new PgSqlParser();
+            $guard = new PgSqlQueryGuard($parser);
+            $castRenderer = new PgSqlCastRenderer();
+            $quoter = new PgSqlIdentifierQuoter();
+            $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+            $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+            $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+            $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+            $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+            $schemaParser = new PgSqlSchemaParser();
+            $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
+            $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
+            $values = (new Input\InsertLiterals($this->faker))->buildInsertValues($definition);
+            $insertSql = 'INSERT INTO ' . (new PgSqlIdentifierQuoter())->quote($tableName) . ' (' . implode(', ', array_map(fn (string $c) => (new PgSqlIdentifierQuoter())->quote($c), $definition->columns)) . ') VALUES (' . $values . ')';
             try {
                 $plan = $rewriter->rewrite($insertSql);
                 self::assertNotEmpty($plan->sql());
                 self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
-
                 if ($plan->mutation() !== null) {
                     $countBefore = count($shadowStore->get($tableName));
-                    $fakeResultRows = [$this->generateFixtureRows($definition, 1)[0]];
+                    $fakeResultRows = [(new Input\SchemaRows())->generateFixtureRows($definition, 1)[0]];
                     $plan->mutation()->apply($shadowStore, $fakeResultRows);
-
                     $storedRows = $shadowStore->get($tableName);
                     self::assertNotEmpty($storedRows);
-                    self::assertGreaterThanOrEqual(
-                        $countBefore,
-                        count($storedRows),
-                        "INSERT mutation should not decrease row count on iteration $i"
-                    );
+                    self::assertGreaterThanOrEqual($countBefore, count($storedRows), "INSERT mutation should not decrease row count on iteration {$i}");
                 }
             } catch (UnsupportedSqlException|UnknownSchemaException) {
-            } catch (\Throwable $e) {
-                self::fail("Full pipeline INSERT crashed on iteration $i\nCREATE: $createSql\nINSERT: $insertSql\nError: " . $e->getMessage());
+                continue;
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Test create table then update does not crash.
+     */
     public function testCreateTableThenUpdateDoesNotCrash(): void
     {
         $this->faker->seed(20260815);
@@ -217,47 +170,48 @@ final class FullPipelineFuzzTest extends TestCase
             if ($definition === null || $definition->columns === [] || $definition->primaryKeys === []) {
                 continue;
             }
-
             $shadowStore = new ShadowStore();
             $registry = new TableDefinitionRegistry();
-
-            $tableName = $this->extractTableName($createSql);
+            $tableName = (new Input\SchemaRows())->extractTableName($createSql);
             if ($tableName === null) {
                 continue;
             }
-
             $registry->register($tableName, $definition);
-            $fixtureRows = $this->generateFixtureRows($definition, 3);
+            $fixtureRows = (new Input\SchemaRows())->generateFixtureRows($definition, 3);
             $shadowStore->set($tableName, $fixtureRows);
-
-            $rewriter = $this->buildRewriter($shadowStore, $registry);
-
+            $parser = new PgSqlParser();
+            $guard = new PgSqlQueryGuard($parser);
+            $castRenderer = new PgSqlCastRenderer();
+            $quoter = new PgSqlIdentifierQuoter();
+            $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+            $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+            $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+            $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+            $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+            $schemaParser = new PgSqlSchemaParser();
+            $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
+            $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
             $firstCol = $definition->columns[0];
-            $updateSql = 'UPDATE ' . $this->quoteIdentifier($tableName) . ' SET ' . $this->quoteIdentifier($firstCol) . ' = ' . $this->quoteIdentifier($firstCol);
-
+            $updateSql = 'UPDATE ' . (new PgSqlIdentifierQuoter())->quote($tableName) . ' SET ' . (new PgSqlIdentifierQuoter())->quote($firstCol) . ' = ' . (new PgSqlIdentifierQuoter())->quote($firstCol);
             try {
                 $plan = $rewriter->rewrite($updateSql);
                 self::assertNotEmpty($plan->sql());
                 self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
-
                 if ($plan->mutation() !== null) {
                     $countBefore = count($shadowStore->get($tableName));
                     $plan->mutation()->apply($shadowStore, $fixtureRows);
                     $storedRows = $shadowStore->get($tableName);
-                    self::assertCount(
-                        $countBefore,
-                        $storedRows,
-                        "UPDATE mutation should preserve row count on iteration $i"
-                    );
+                    self::assertCount($countBefore, $storedRows, "UPDATE mutation should preserve row count on iteration {$i}");
                 }
             } catch (UnsupportedSqlException|UnknownSchemaException) {
-            } catch (\Throwable $e) {
-                self::fail("Full pipeline UPDATE crashed on iteration $i\nCREATE: $createSql\nUPDATE: $updateSql\nError: " . $e->getMessage());
+                continue;
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Test create table then delete does not crash.
+     */
     public function testCreateTableThenDeleteDoesNotCrash(): void
     {
         $this->faker->seed(20260815);
@@ -267,41 +221,46 @@ final class FullPipelineFuzzTest extends TestCase
             if ($definition === null || $definition->columns === []) {
                 continue;
             }
-
             $shadowStore = new ShadowStore();
             $registry = new TableDefinitionRegistry();
-
-            $tableName = $this->extractTableName($createSql);
+            $tableName = (new Input\SchemaRows())->extractTableName($createSql);
             if ($tableName === null) {
                 continue;
             }
-
             $registry->register($tableName, $definition);
-            $fixtureRows = $this->generateFixtureRows($definition, 3);
+            $fixtureRows = (new Input\SchemaRows())->generateFixtureRows($definition, 3);
             $shadowStore->set($tableName, $fixtureRows);
-
-            $rewriter = $this->buildRewriter($shadowStore, $registry);
-
-            $deleteSql = 'DELETE FROM ' . $this->quoteIdentifier($tableName);
-
+            $parser = new PgSqlParser();
+            $guard = new PgSqlQueryGuard($parser);
+            $castRenderer = new PgSqlCastRenderer();
+            $quoter = new PgSqlIdentifierQuoter();
+            $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+            $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+            $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+            $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+            $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+            $schemaParser = new PgSqlSchemaParser();
+            $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
+            $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
+            $deleteSql = 'DELETE FROM ' . (new PgSqlIdentifierQuoter())->quote($tableName);
             try {
                 $plan = $rewriter->rewrite($deleteSql);
                 self::assertNotEmpty($plan->sql());
                 self::assertSame(QueryKind::WRITE_SIMULATED, $plan->kind());
-
                 if ($plan->mutation() !== null) {
                     $plan->mutation()->apply($shadowStore, $fixtureRows);
                     $storedRows = $shadowStore->get($tableName);
-                    self::assertNotEmpty($storedRows);
+                    self::assertSame([], $storedRows, "Deleting every result row should empty the shadow table on iteration {$i}");
                 }
             } catch (UnsupportedSqlException|UnknownSchemaException) {
-            } catch (\Throwable $e) {
-                self::fail("Full pipeline DELETE crashed on iteration $i\nCREATE: $createSql\nDELETE: $deleteSql\nError: " . $e->getMessage());
+                continue;
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Test create table rewrite registers then dml succeeds.
+     */
     public function testCreateTableRewriteRegistersThenDmlSucceeds(): void
     {
         $this->faker->seed(20260815);
@@ -311,37 +270,43 @@ final class FullPipelineFuzzTest extends TestCase
             if ($definition === null || $definition->columns === []) {
                 continue;
             }
-
             $shadowStore = new ShadowStore();
             $registry = new TableDefinitionRegistry();
-
-            $tableName = $this->extractTableName($createSql);
+            $tableName = (new Input\SchemaRows())->extractTableName($createSql);
             if ($tableName === null) {
                 continue;
             }
-
-            $rewriter = $this->buildRewriter($shadowStore, $registry);
-
+            $parser = new PgSqlParser();
+            $guard = new PgSqlQueryGuard($parser);
+            $castRenderer = new PgSqlCastRenderer();
+            $quoter = new PgSqlIdentifierQuoter();
+            $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+            $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+            $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+            $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+            $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+            $schemaParser = new PgSqlSchemaParser();
+            $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
+            $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
             try {
                 $createPlan = $rewriter->rewrite($createSql);
                 self::assertSame(QueryKind::DDL_SIMULATED, $createPlan->kind());
-
                 if ($createPlan->mutation() !== null) {
                     $createPlan->mutation()->apply($shadowStore, []);
                 }
-
-                $selectSql = 'SELECT * FROM ' . $this->quoteIdentifier($tableName);
+                $selectSql = 'SELECT * FROM ' . (new PgSqlIdentifierQuoter())->quote($tableName);
                 $selectPlan = $rewriter->rewrite($selectSql);
                 self::assertNotEmpty($selectPlan->sql());
                 self::assertSame(QueryKind::READ, $selectPlan->kind());
             } catch (UnsupportedSqlException|UnknownSchemaException) {
-            } catch (\Throwable $e) {
-                self::fail("Full pipeline CREATE->SELECT crashed on iteration $i\nCREATE: $createSql\nError: " . $e->getMessage());
+                continue;
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Test shadow store integrity after multiple operations.
+     */
     public function testShadowStoreIntegrityAfterMultipleOperations(): void
     {
         $this->faker->seed(20260815);
@@ -351,104 +316,64 @@ final class FullPipelineFuzzTest extends TestCase
             if ($definition === null || $definition->columns === []) {
                 continue;
             }
-
             $shadowStore = new ShadowStore();
             $registry = new TableDefinitionRegistry();
-
-            $tableName = $this->extractTableName($createSql);
+            $tableName = (new Input\SchemaRows())->extractTableName($createSql);
             if ($tableName === null) {
                 continue;
             }
-
             $registry->register($tableName, $definition);
-            $fixtureRows = $this->generateFixtureRows($definition, 3);
+            $fixtureRows = (new Input\SchemaRows())->generateFixtureRows($definition, 3);
             $shadowStore->set($tableName, $fixtureRows);
-
-            $rewriter = $this->buildRewriter($shadowStore, $registry);
-
-            $operations = [
-                'SELECT * FROM ' . $this->quoteIdentifier($tableName),
-                'INSERT INTO ' . $this->quoteIdentifier($tableName) . ' (' . implode(', ', array_map(fn (string $c) => $this->quoteIdentifier($c), $definition->columns)) . ') VALUES (' . $this->buildInsertValues($definition) . ')',
-            ];
+            $parser = new PgSqlParser();
+            $guard = new PgSqlQueryGuard($parser);
+            $castRenderer = new PgSqlCastRenderer();
+            $quoter = new PgSqlIdentifierQuoter();
+            $selectTransformer = new SelectTransformer($castRenderer, $quoter);
+            $insertTransformer = new InsertTransformer($parser, $selectTransformer);
+            $updateTransformer = new UpdateTransformer($parser, $selectTransformer);
+            $deleteTransformer = new DeleteTransformer($parser, $selectTransformer);
+            $transformer = new PgSqlTransformer($parser, $selectTransformer, $insertTransformer, $updateTransformer, $deleteTransformer);
+            $schemaParser = new PgSqlSchemaParser();
+            $mutationResolver = new PgSqlMutationResolver($shadowStore, $registry, $schemaParser, $parser);
+            $rewriter = new PgSqlRewriter($guard, $shadowStore, $registry, $transformer, $mutationResolver, $parser);
+            $operations = ['SELECT * FROM ' . (new PgSqlIdentifierQuoter())->quote($tableName), 'INSERT INTO ' . (new PgSqlIdentifierQuoter())->quote($tableName) . ' (' . implode(', ', array_map(fn (string $c) => (new PgSqlIdentifierQuoter())->quote($c), $definition->columns)) . ') VALUES (' . (new Input\InsertLiterals($this->faker))->buildInsertValues($definition) . ')'];
             if ($definition->primaryKeys !== []) {
-                $operations[] = 'UPDATE ' . $this->quoteIdentifier($tableName) . ' SET ' . $this->quoteIdentifier($definition->columns[0]) . ' = ' . $this->quoteIdentifier($definition->columns[0]);
+                $operations[] = 'UPDATE ' . (new PgSqlIdentifierQuoter())->quote($tableName) . ' SET ' . (new PgSqlIdentifierQuoter())->quote($definition->columns[0]) . ' = ' . (new PgSqlIdentifierQuoter())->quote($definition->columns[0]);
             }
-            $operations[] = 'DELETE FROM ' . $this->quoteIdentifier($tableName);
-
+            $operations[] = 'DELETE FROM ' . (new PgSqlIdentifierQuoter())->quote($tableName);
             foreach ($operations as $sql) {
                 try {
                     $plan = $rewriter->rewrite($sql);
                     self::assertNotEmpty($plan->sql());
                     self::assertInstanceOf(QueryKind::class, $plan->kind());
-
                     if ($plan->mutation() !== null) {
-                        $fakeRows = $this->generateFixtureRows($definition, 1);
+                        $fakeRows = (new Input\SchemaRows())->generateFixtureRows($definition, 1);
                         $plan->mutation()->apply($shadowStore, $fakeRows);
                     }
-
                     $allData = $shadowStore->getAll();
                     foreach ($allData as $tblName => $tblRows) {
                         self::assertNotEmpty($tblName, 'ShadowStore table name must not be empty');
                         foreach ($tblRows as $rowIdx => $row) {
-                            self::assertNotEmpty($row, "ShadowStore table '$tblName' row $rowIdx must not be empty");
+                            self::assertNotEmpty($row, "ShadowStore table '{$tblName}' row {$rowIdx} must not be empty");
                         }
                     }
-
                     self::assertArrayHasKey($tableName, $allData);
-
                     if ($plan->kind() === QueryKind::READ) {
-                        self::assertNull($plan->mutation(), "READ plan must have no mutation");
+                        self::assertNull($plan->mutation(), 'READ plan must have no mutation');
                     } elseif ($plan->kind() === QueryKind::WRITE_SIMULATED) {
-                        self::assertNotNull($plan->mutation(), "WRITE_SIMULATED plan must have a mutation");
+                        self::assertNotNull($plan->mutation(), 'WRITE_SIMULATED plan must have a mutation');
                     } elseif ($plan->kind() === QueryKind::DDL_SIMULATED) {
-                        self::assertNotNull($plan->mutation(), "DDL_SIMULATED plan must have a mutation");
+                        self::assertNotNull($plan->mutation(), 'DDL_SIMULATED plan must have a mutation');
                     }
                 } catch (UnsupportedSqlException|UnknownSchemaException) {
-                } catch (\Throwable $e) {
-                    self::fail("ShadowStore integrity check failed on iteration $i with SQL: $sql\nCREATE: $createSql\nError: " . $e->getMessage());
+                    continue;
                 }
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
 
-    /**
-     * Extract table name from a CREATE TABLE statement.
-     */
-    private function extractTableName(string $createSql): ?string
-    {
-        if (preg_match('/CREATE\s+(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"([^"]+)"|([a-zA-Z_]\w*))\.)?(?:"([^"]+)"|([a-zA-Z_]\w*))/i', $createSql, $m) !== 1) {
-            return null;
-        }
 
-        $quotedTable = $m[3] ?? '';
-        return $quotedTable !== '' ? $quotedTable : ($m[4] ?? null);
-    }
 
-    private function quoteIdentifier(string $name): string
-    {
-        return '"' . str_replace('"', '""', $name) . '"';
-    }
-
-    /**
-     * Build a VALUES clause with placeholder literals for all columns.
-     */
-    private function buildInsertValues(TableDefinition $definition): string
-    {
-        $values = [];
-        foreach ($definition->columns as $col) {
-            $type = strtoupper($definition->columnTypes[$col] ?? 'TEXT');
-            $baseType = preg_replace('/\(.*\)/', '', $type);
-            $baseType = trim($baseType ?? $type);
-
-            $values[] = match (true) {
-                in_array($baseType, ['INT', 'INT2', 'INT4', 'INT8', 'INTEGER', 'SMALLINT', 'BIGINT', 'SERIAL', 'SMALLSERIAL', 'BIGSERIAL'], true) => (string) $this->faker->numberBetween(1, 9999),
-                in_array($baseType, ['REAL', 'FLOAT4', 'DOUBLE PRECISION', 'FLOAT8', 'DECIMAL', 'NUMERIC'], true) => (string) round($this->faker->randomFloat(2, 0, 999), 2),
-                in_array($baseType, ['BOOLEAN', 'BOOL'], true) => $this->faker->boolean() ? 'TRUE' : 'FALSE',
-                default => "'" . str_replace("'", "''", $this->faker->word()) . "'",
-            };
-        }
-
-        return implode(', ', $values);
-    }
 }

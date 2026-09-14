@@ -5,11 +5,12 @@ declare(strict_types=1);
 namespace Fuzz;
 
 use Faker\Factory;
+use Override;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
 use SqlFaker\PostgreSqlProvider;
-use ZtdQuery\Platform\Postgres\PgSqlSchemaParser;
+use ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser;
 use ZtdQuery\Schema\TableDefinition;
 
 /**
@@ -30,105 +31,74 @@ use ZtdQuery\Schema\TableDefinition;
 final class SchemaParserFuzzTest extends TestCase
 {
     private const ITERATIONS = 100;
-
     private PgSqlSchemaParser $parser;
-
     private PostgreSqlProvider $provider;
-
+    #[Override]
     protected function setUp(): void
     {
         $this->parser = new PgSqlSchemaParser();
         $faker = Factory::create();
-        $this->provider = new PostgreSqlProvider($faker);
+        $this->provider = new PostgreSqlProvider($faker, 'pg-17.2');
         $faker->seed(20260815);
     }
-
+    /**
+     * Test parse does not crash on random create table.
+     */
     public function testParseDoesNotCrashOnRandomCreateTable(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $sql = $this->provider->createTableStatement(50);
-            try {
-                $result = $this->parser->parse($sql);
-                if ($result !== null) {
-                    self::assertInstanceOf(TableDefinition::class, $result);
-                }
-            } catch (\Throwable $e) {
-                self::fail("parse() crashed on iteration $i with SQL: $sql\nError: " . $e->getMessage());
+            $result = $this->parser->parse($sql);
+            if ($result !== null) {
+                self::assertInstanceOf(TableDefinition::class, $result);
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Check that accepted definitions retain consistent column references.
+     *
+     * SQLFaker can generate constraints naming undeclared columns. The parser
+     * may reject these definitions; accepted metadata must satisfy its contract.
+     */
     public function testParseStructuralInvariantsOnRandomCreateTable(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $sql = $this->provider->createTableStatement(50);
-            try {
-                $result = $this->parser->parse($sql);
-                if ($result === null) {
-                    continue;
+            $result = $this->parser->parse($sql);
+            if ($result === null) {
+                continue;
+            }
+            foreach ($result->primaryKeys as $pk) {
+                self::assertContains($pk, $result->columns, "Primary key '{$pk}' is not in columns on iteration {$i} with SQL: {$sql}");
+            }
+            foreach (array_keys($result->columnTypes) as $colName) {
+                self::assertContains($colName, $result->columns, "Column type key '{$colName}' is not in columns on iteration {$i} with SQL: {$sql}");
+            }
+            foreach ($result->notNullColumns as $notNull) {
+                self::assertContains($notNull, $result->columns, "Not-null column '{$notNull}' is not in columns on iteration {$i} with SQL: {$sql}");
+            }
+            foreach ($result->uniqueConstraints as $constraintName => $constraintCols) {
+                foreach ($constraintCols as $col) {
+                    self::assertContains($col, $result->columns, "Unique constraint '{$constraintName}' column '{$col}' is not in columns on iteration {$i} with SQL: {$sql}");
                 }
-
-                foreach ($result->primaryKeys as $pk) {
-                    self::assertContains(
-                        $pk,
-                        $result->columns,
-                        "Primary key '$pk' is not in columns on iteration $i with SQL: $sql",
-                    );
-                }
-
-                foreach (array_keys($result->columnTypes) as $colName) {
-                    self::assertContains(
-                        $colName,
-                        $result->columns,
-                        "Column type key '$colName' is not in columns on iteration $i with SQL: $sql",
-                    );
-                }
-
-                foreach ($result->notNullColumns as $notNull) {
-                    self::assertContains(
-                        $notNull,
-                        $result->columns,
-                        "Not-null column '$notNull' is not in columns on iteration $i with SQL: $sql",
-                    );
-                }
-
-                foreach ($result->uniqueConstraints as $constraintName => $constraintCols) {
-                    foreach ($constraintCols as $col) {
-                        self::assertContains(
-                            $col,
-                            $result->columns,
-                            "Unique constraint '$constraintName' column '$col' is not in columns on iteration $i with SQL: $sql",
-                        );
-                    }
-                }
-
-                self::assertNotEmpty($result->columns, "columns is empty for non-null result on iteration $i with SQL: $sql");
-
-                foreach (array_keys($result->typedColumns) as $typedCol) {
-                    self::assertContains(
-                        $typedCol,
-                        $result->columns,
-                        "typedColumns key '$typedCol' is not in columns on iteration $i with SQL: $sql",
-                    );
-                }
-            } catch (\Throwable $e) {
-                self::fail("parse() crashed on iteration $i with SQL: $sql\nError: " . $e->getMessage());
+            }
+            self::assertNotEmpty($result->columns, "columns is empty for non-null result on iteration {$i} with SQL: {$sql}");
+            foreach (array_keys($result->typedColumns) as $typedCol) {
+                self::assertContains($typedCol, $result->columns, "typedColumns key '{$typedCol}' is not in columns on iteration {$i} with SQL: {$sql}");
             }
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
-
+    /**
+     * Test parse returns null on non create table sql.
+     */
     public function testParseReturnsNullOnNonCreateTableSql(): void
     {
         for ($i = 0; $i < self::ITERATIONS; $i++) {
             $sql = $this->provider->selectStatement(50);
-            try {
-                $result = $this->parser->parse($sql);
-                self::assertNull($result, "parse() should return null for SELECT on iteration $i with SQL: $sql");
-            } catch (\Throwable $e) {
-                self::fail("parse() crashed on SELECT iteration $i with SQL: $sql\nError: " . $e->getMessage());
-            }
+            $result = $this->parser->parse($sql);
+            self::assertNull($result, "parse() should return null for SELECT on iteration {$i} with SQL: {$sql}");
         }
         self::addToAssertionCount(self::ITERATIONS);
     }
