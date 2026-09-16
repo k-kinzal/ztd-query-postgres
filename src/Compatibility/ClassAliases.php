@@ -16,8 +16,8 @@ use Composer\Autoload\ClassLoader;
 $formerNames = [
     ZtdQuery\Platform\Postgres\Connection\Copy\PgSqlCopySupport::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlCopySupport',
     ZtdQuery\Platform\Postgres\Connection\PgSqlErrorClassifier::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlErrorClassifier',
-    ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoParameterBindingCompiler::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlPdoParameterBindingCompiler',
-    ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoPlaceholderEscaper::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlPdoPlaceholderEscaper',
+    ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoParameterBindingCompiler::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlPdoParameterBindingCompiler',
+    ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoPlaceholderEscaper::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlPdoPlaceholderEscaper',
     ZtdQuery\Platform\Postgres\Connection\Result\PgSqlPdoResultColumnTypeResolver::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlPdoResultColumnTypeResolver',
     ZtdQuery\Platform\Postgres\Rewrite\Cte\PgSqlCteShadowComposer::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlCteShadowComposer',
     ZtdQuery\Platform\Postgres\Rewrite\GeneratedColumn\PgSqlGeneratedColumnProjector::class => 'ZtdQuery\\Platform\\Postgres\\PgSqlGeneratedColumnProjector',

@@ -38,7 +38,7 @@ final class TableDefinitionClauses
                 $index++;
             }
 
-            $identifier = (new Identifiers())->truncateIdentifierAt($stream, $index);
+            $identifier = (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->truncateIdentifierAt($stream, $index);
             if ($identifier === null) {
                 break;
             }
@@ -46,7 +46,7 @@ final class TableDefinitionClauses
             $index = $identifier['next'];
 
             while (($tokens[$index] ?? null)?->text === '.') {
-                $identifier = (new Identifiers())->truncateIdentifierAt($stream, $index + 1);
+                $identifier = (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->truncateIdentifierAt($stream, $index + 1);
                 if ($identifier === null) {
                     break 2;
                 }
@@ -75,7 +75,7 @@ final class TableDefinitionClauses
     {
         $sql = PostgreSqlLexicalMasker::maskComments($sql);
         if (preg_match('/CREATE\s+(?:TEMPORARY\s+|TEMP\s+|UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)/i', $sql, $m) === 1) {
-            return (new Identifiers())->unquoteIdentifier((new Identifiers())->stripSchemaPrefix($m[1]));
+            return (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->unquoteIdentifier((new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->stripSchemaPrefix($m[1]));
         }
 
         return null;
@@ -128,7 +128,7 @@ final class TableDefinitionClauses
     {
         $sql = PostgreSqlLexicalMasker::maskComments($sql);
         if (preg_match('/\(\s*LIKE\s+("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)/i', $sql, $m) === 1) {
-            return (new Identifiers())->unquoteIdentifier((new Identifiers())->stripSchemaPrefix($m[1]));
+            return (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->unquoteIdentifier((new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->stripSchemaPrefix($m[1]));
         }
 
         return null;
@@ -141,7 +141,7 @@ final class TableDefinitionClauses
     {
         $sql = PostgreSqlLexicalMasker::maskComments($sql);
         if (preg_match('/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)/i', $sql, $m) === 1) {
-            return (new Identifiers())->unquoteIdentifier((new Identifiers())->stripSchemaPrefix($m[1]));
+            return (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->unquoteIdentifier((new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->stripSchemaPrefix($m[1]));
         }
 
         return null;
@@ -163,7 +163,7 @@ final class TableDefinitionClauses
     {
         $sql = PostgreSqlLexicalMasker::maskComments($sql);
         if (preg_match('/ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?("[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)/i', $sql, $m) === 1) {
-            return (new Identifiers())->unquoteIdentifier((new Identifiers())->stripSchemaPrefix($m[1]));
+            return (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->unquoteIdentifier((new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->stripSchemaPrefix($m[1]));
         }
 
         return null;

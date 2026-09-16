@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace ZtdQuery\Platform\Postgres\Connection\Placeholder;
+namespace ZtdQuery\Platform\Postgres\Connection\Parameter;
 
 /**
  * Tracks the source position and operand context while escaping PDO placeholders.

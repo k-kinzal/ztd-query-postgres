@@ -7,7 +7,7 @@ namespace ZtdQuery\Platform\Postgres;
 use ZtdQuery\Config\ZtdConfig;
 use ZtdQuery\Connection\ConnectionInterface;
 use ZtdQuery\Platform\Postgres\Connection\Copy\PgSqlCopySupport;
-use ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoParameterBindingCompiler;
+use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoParameterBindingCompiler;
 use ZtdQuery\Platform\Postgres\Connection\Result\PgSqlPdoResultColumnTypeResolver;
 use ZtdQuery\Platform\Postgres\Rewrite\PgSqlQueryGuard;
 use ZtdQuery\Platform\Postgres\Rewrite\PgSqlRewriter;

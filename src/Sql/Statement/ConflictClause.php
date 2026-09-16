@@ -149,7 +149,7 @@ final class ConflictClause
         foreach ($assignments as $assignment) {
             $assignment = trim($assignment);
             if (preg_match('/^("[^"]+"|[a-zA-Z_]\w*)\s*=\s*(.+)$/s', $assignment, $parts) === 1) {
-                $colName = (new Identifiers())->unquoteIdentifier($parts[1]);
+                $colName = (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->unquoteIdentifier($parts[1]);
                 $columns[] = $colName;
                 $values[$colName] = trim($parts[2]);
             }

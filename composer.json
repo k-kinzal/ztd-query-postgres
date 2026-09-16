@@ -5,23 +5,25 @@
   "license": "MIT",
   "require": {
     "php": "^8.1",
-    "k-kinzal/ztd-query-core": "@dev"
+    "k-kinzal/ztd-query-core": "dev-main"
   },
   "require-dev": {
     "brianium/paratest": "^7.3",
     "deptrac/deptrac": "^3.0",
-    "friendsofphp/php-cs-fixer": "^3.95.24",
+    "friendsofphp/php-cs-fixer": "^3.95.25",
     "k-kinzal/php-ai-toolkit": "dev-main",
-    "k-kinzal/sql-faker": "@dev",
+    "k-kinzal/sql-faker": "dev-main",
     "nikic/php-fuzzer": "^0.0.11",
     "phpbench/phpbench": "^1.4",
     "phpcompatibility/php-compatibility": "^10.0.0-alpha2",
     "phpstan/phpstan": "^2.1",
+    "phpstan/phpstan-strict-rules": "^2.0",
     "phpunit/phpunit": "^10.5",
     "squizlabs/php_codesniffer": "^4.0.4"
   },
   "repositories": [
     {
+      "name": "php-ai-toolkit",
       "type": "vcs",
       "url": "https://github.com/k-kinzal/php-ai-toolkit.git"
     }
@@ -42,13 +44,49 @@
     }
   },
   "scripts": {
+    "autoload:check": "composer dump-autoload --optimize --strict-psr --strict-ambiguous",
     "bench": "phpbench run --report=aggregate",
-    "bench:quick": "phpbench run --report=aggregate --warmup=1 --iterations=3 --retry-threshold=10",
     "bench:full": "@bench",
-    "test": "paratest --processes=auto",
-    "test:unit": "phpunit --testsuite unit",
-    "test:fuzz": "phpunit fuzz/",
+    "bench:quick": "phpbench run --report=aggregate --warmup=1 --iterations=3 --retry-threshold=10",
+    "compat": "phpcs",
+    "deptrac": "deptrac analyse --config-file=deptrac.yaml --fail-on-uncovered --report-uncovered",
+    "docgen": "docgen --packages=. --title=k-kinzal/ztd-query-postgres --exclude=src/Compatibility/ClassAliases.php",
+    "docgen:diff": [
+      "Composer\\Config::disableProcessTimeout",
+      "@docgen --diff=origin/main --serve"
+    ],
+    "docgen:fresh": "@docgen --no-cache",
+    "docgen:serve": [
+      "Composer\\Config::disableProcessTimeout",
+      "@docgen --serve"
+    ],
+    "doctest": "phpunit --testsuite doctest",
+    "format": "php-cs-fixer fix --allow-risky=yes",
+    "format:check": "php-cs-fixer fix --dry-run --diff --allow-risky=yes",
+    "fuzz": "@fuzz:smoke",
+    "fuzz:robustness": [
+      "Composer\\Config::disableProcessTimeout",
+      "@php -r \"is_dir('fuzz/corpus/robustness') || mkdir('fuzz/corpus/robustness', 0777, true);\" --",
+      "php-fuzzer fuzz fuzz/fuzz_robustness.php fuzz/corpus/robustness/"
+    ],
+    "fuzz:robustness:classify": [
+      "Composer\\Config::disableProcessTimeout",
+      "@php -r \"is_dir('fuzz/corpus/robustness-classify') || mkdir('fuzz/corpus/robustness-classify', 0777, true);\" --",
+      "php-fuzzer fuzz fuzz/fuzz_robustness_classify.php fuzz/corpus/robustness-classify/"
+    ],
+    "fuzz:robustness:rewrite": [
+      "Composer\\Config::disableProcessTimeout",
+      "@php -r \"is_dir('fuzz/corpus/robustness-rewrite') || mkdir('fuzz/corpus/robustness-rewrite', 0777, true);\" --",
+      "php-fuzzer fuzz fuzz/fuzz_robustness_rewrite.php fuzz/corpus/robustness-rewrite/"
+    ],
+    "fuzz:smoke": [
+      "Composer\\Config::disableProcessTimeout",
+      "@fuzz:robustness --max-runs=100",
+      "@fuzz:robustness:classify --max-runs=100",
+      "@fuzz:robustness:rewrite --max-runs=100"
+    ],
     "lint": [
+      "@autoload:check",
       "@format:check",
       "@phpstan",
       "@compat",
@@ -56,45 +94,29 @@
       "@tree-guard",
       "@deptrac"
     ],
-    "format": "php-cs-fixer fix --allow-risky=yes",
-    "format:check": "php-cs-fixer fix --dry-run --diff --allow-risky=yes",
-    "fuzz": [
-      "@fuzz:robustness",
-      "@fuzz:robustness:classify",
-      "@fuzz:robustness:rewrite"
-    ],
-    "fuzz:robustness": "php-fuzzer fuzz fuzz/fuzz_robustness.php fuzz/corpus/robustness/",
-    "fuzz:robustness:classify": "php-fuzzer fuzz fuzz/fuzz_robustness_classify.php fuzz/corpus/robustness-classify/",
-    "fuzz:robustness:rewrite": "php-fuzzer fuzz fuzz/fuzz_robustness_rewrite.php fuzz/corpus/robustness-rewrite/",
-    "doctest": "phpunit --testsuite doctest",
-    "phpstan": "phpstan analyse --memory-limit=512M",
-    "compat": "phpcs",
     "loc-guard": "loc-guard --config=loc.yaml",
-    "tree-guard": "tree-guard --config=tree.yaml",
-    "deptrac": [
-      "deptrac analyse --config-file=deptrac.yaml --fail-on-uncovered --report-uncovered",
-      "deptrac debug:unassigned --config-file=deptrac.yaml"
-    ],
-    "deptrac:debug": [
-      "deptrac debug:unassigned --config-file=deptrac.yaml",
-      "deptrac debug:unused --config-file=deptrac.yaml"
-    ],
-    "docgen": "cd ../.. && packages/ztd-query-postgres/vendor/bin/docgen --packages=packages/ztd-query-postgres --deptrac=\"$(pwd)/packages/ztd-query-postgres/deptrac.yaml\" --exclude=packages/ztd-query-postgres/src/Compatibility/ClassAliases.php --exclude='packages/ztd-query-postgres/../ztd-query-core/tests/*' --output=packages/ztd-query-postgres/build/docs --cache-dir=packages/ztd-query-postgres/build/docgen-cache --title=k-kinzal/ztd-query-postgres",
-    "docgen:serve": "@docgen --serve",
-    "docgen:diff": "@docgen --diff=origin/main --serve",
-    "docgen:fresh": "@docgen --no-cache"
+    "phpstan": "phpstan analyse --memory-limit=512M",
+    "test": "paratest --processes=auto",
+    "test:coverage": "@php -d memory_limit=1G vendor/bin/paratest --processes=auto --testsuite unit --coverage-xml build/coverage-xml --log-junit build/junit.xml",
+    "test:fuzz": "phpunit fuzz/",
+    "test:unit": "phpunit --testsuite unit",
+    "tree-guard": "tree-guard --config=tree.yaml"
   },
   "config": {
     "allow-plugins": {
       "dealerdirect/phpcodesniffer-composer-installer": true
     },
-    "sort-packages": true,
     "platform": {
       "php": "8.1.0"
-    }
+    },
+    "sort-packages": true
   },
   "support": {
     "source": "https://github.com/k-kinzal/ztd-query-php/tree/main/packages/ztd-query-postgres",
-    "docs": "https://k-kinzal.github.io/ztd-query-php/ztd-query-postgres/k-kinzal/ztd-query-postgres/"
+    "docs": "https://k-kinzal.github.io/ztd-query-php/k-kinzal/ztd-query-postgres/"
+  },
+  "scripts-descriptions": {
+    "fuzz": "Run every fuzz target with the bounded smoke budget.",
+    "fuzz:smoke": "Run each fuzz target for up to 100 executions; individual fuzz:* commands run continuously."
   }
 }

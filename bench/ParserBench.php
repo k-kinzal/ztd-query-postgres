@@ -7,6 +7,9 @@ namespace Bench;
 use PhpBench\Attributes as Bench;
 use ZtdQuery\Platform\Postgres\Sql\PgSqlParser;
 
+/**
+ * Measures PostgreSQL statement classification and splitting.
+ */
 final class ParserBench
 {
     private PgSqlParser $parser;
@@ -15,11 +18,17 @@ final class ParserBench
 
     private string $insertSql = "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')";
 
+    /**
+     * Initializes the parser before measuring SQL operations.
+     */
     public function setUp(): void
     {
         $this->parser = new PgSqlParser();
     }
 
+    /**
+     * Classifies a SELECT query with a join and a filter.
+     */
     #[Bench\BeforeMethods('setUp')]
     #[Bench\Revs(250)]
     public function benchClassifySelect(): void
@@ -27,6 +36,9 @@ final class ParserBench
         $this->parser->classifyStatement($this->selectSql);
     }
 
+    /**
+     * Splits a single INSERT statement into parser input statements.
+     */
     #[Bench\BeforeMethods('setUp')]
     #[Bench\Revs(250)]
     public function benchSplitInsert(): void

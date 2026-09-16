@@ -34,7 +34,7 @@ final class PgSqlParser
      */
     public function classifyStatement(string $sql): ?string
     {
-        return (new Statement\Classification())->classifyStatement($sql);
+        return (new Statement\StatementClassifier())->classifyStatement($sql);
     }
 
     /**
@@ -58,7 +58,7 @@ final class PgSqlParser
      */
     public function extractInsertTable(string $sql): ?string
     {
-        return (new Statement\Identifiers())->extractInsertTable($sql);
+        return (new Statement\TargetTableParser())->extractInsertTable($sql);
     }
 
     /**
@@ -71,7 +71,7 @@ final class PgSqlParser
      */
     public function extractInsertColumns(string $sql): array
     {
-        return (new Statement\Identifiers())->extractInsertColumns($sql);
+        return (new Dml\Insert\InsertClauseParser())->extractInsertColumns($sql);
     }
 
     /**
@@ -84,7 +84,7 @@ final class PgSqlParser
      */
     public function extractInsertValues(string $sql): array
     {
-        return (new Statement\InsertSource())->extractInsertValues($sql);
+        return (new Dml\Insert\InsertClauseParser())->extractInsertValues($sql);
     }
 
     /**
@@ -141,7 +141,7 @@ final class PgSqlParser
      */
     public function hasInsertSelect(string $sql): bool
     {
-        return (new Statement\InsertSource())->hasInsertSelect($sql);
+        return (new Dml\Insert\InsertClauseParser())->hasInsertSelect($sql);
     }
 
     /**
@@ -152,7 +152,7 @@ final class PgSqlParser
      */
     public function extractInsertSelectSql(string $sql): ?string
     {
-        return (new Statement\InsertSource())->extractInsertSelectSql($sql);
+        return (new Dml\Insert\InsertClauseParser())->extractInsertSelectSql($sql);
     }
 
     /**
@@ -163,7 +163,7 @@ final class PgSqlParser
      */
     public function extractUpdateTable(string $sql): ?string
     {
-        return (new Statement\Identifiers())->extractUpdateTable($sql);
+        return (new Statement\TargetTableParser())->extractUpdateTable($sql);
     }
 
     /**
@@ -174,7 +174,7 @@ final class PgSqlParser
      */
     public function extractUpdateAlias(string $sql): ?string
     {
-        return (new Statement\Identifiers())->extractUpdateAlias($sql);
+        return (new Dml\Update\UpdateClauseParser())->extractUpdateAlias($sql);
     }
 
     /**
@@ -187,7 +187,7 @@ final class PgSqlParser
      */
     public function extractUpdateSets(string $sql): array
     {
-        return (new Statement\Identifiers())->extractUpdateSets($sql);
+        return (new Dml\Update\UpdateClauseParser())->extractUpdateSets($sql);
     }
 
     /**
@@ -226,7 +226,7 @@ final class PgSqlParser
      */
     public function extractDeleteTable(string $sql): ?string
     {
-        return (new Statement\Identifiers())->extractDeleteTable($sql);
+        return (new Statement\TargetTableParser())->extractDeleteTable($sql);
     }
 
     /**
@@ -237,7 +237,7 @@ final class PgSqlParser
      */
     public function extractDeleteAlias(string $sql): ?string
     {
-        return (new Statement\Identifiers())->extractDeleteAlias($sql);
+        return (new Dml\Delete\DeleteClauseParser())->extractDeleteAlias($sql);
     }
 
     /**
@@ -383,7 +383,7 @@ final class PgSqlParser
      */
     public function unquoteIdentifier(string $identifier): string
     {
-        return (new Statement\Identifiers())->unquoteIdentifier($identifier);
+        return (new Lexing\IdentifierDecoder())->unquoteIdentifier($identifier);
     }
 
     /**
@@ -395,7 +395,7 @@ final class PgSqlParser
      */
     public function stripSchemaPrefix(string $name): string
     {
-        return (new Statement\Identifiers())->stripSchemaPrefix($name);
+        return (new Lexing\IdentifierDecoder())->stripSchemaPrefix($name);
     }
 
     /**

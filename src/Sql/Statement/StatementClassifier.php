@@ -11,7 +11,7 @@ use ZtdQuery\Platform\Postgres\Sql\PostgreSqlLexicalMasker;
  *
  * @visibility root
  */
-final class Classification
+final class StatementClassifier
 {
     /**
      * @return 'SELECT'|'INSERT'|'UPDATE'|'DELETE'|'MERGE'|null

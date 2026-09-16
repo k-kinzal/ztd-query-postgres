@@ -2,21 +2,21 @@
 
 declare(strict_types=1);
 
-namespace Tests\Unit\Connection\Placeholder;
+namespace Tests\Unit\Connection\Parameter;
 
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\UsesClass;
 use PHPUnit\Framework\TestCase;
-use ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoParameterBindingCompiler;
-use ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoPlaceholderEscaper;
+use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoParameterBindingCompiler;
+use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoPlaceholderEscaper;
 
 #[CoversClass(PgSqlPdoParameterBindingCompiler::class)]
 #[UsesClass(PgSqlPdoPlaceholderEscaper::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\PgSqlLexerProfile::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\EscapeCursor::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\OperandInput::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\QuotedInput::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\TokenBoundary::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\EscapeCursor::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\OperandInput::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\QuotedInput::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\TokenBoundary::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Lexing\CommentSpan::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Lexing\QuotedSpan::class)]
 final class PgSqlPdoParameterBindingCompilerTest extends TestCase

@@ -11,8 +11,8 @@ use ZtdQuery\Config\ZtdConfig;
 use ZtdQuery\Connection\ConnectionInterface;
 use ZtdQuery\Connection\StatementInterface;
 use ZtdQuery\Platform\Postgres\Connection\Copy\PgSqlCopySupport;
-use ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoParameterBindingCompiler;
-use ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoPlaceholderEscaper;
+use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoParameterBindingCompiler;
+use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoPlaceholderEscaper;
 use ZtdQuery\Platform\Postgres\Connection\Result\PgSqlPdoResultColumnTypeResolver;
 use ZtdQuery\Platform\Postgres\PgSqlSessionFactory;
 use ZtdQuery\Platform\Postgres\Rewrite\PgSqlQueryGuard;
@@ -75,10 +75,10 @@ use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
 #[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Copy\TargetColumns::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Copy\TargetSql::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Copy\TextFields::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\EscapeCursor::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\OperandInput::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\QuotedInput::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\TokenBoundary::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\EscapeCursor::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\OperandInput::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\QuotedInput::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\TokenBoundary::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Shadow\Mutation\Table\TableMutationResolver::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Shadow\Mutation\Row\RowMutationResolver::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Conflict\ColumnSet::class)]
@@ -101,10 +101,14 @@ use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Returning\ProjectionItem::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Sampling\SampleClause::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Sampling\SampleTokens::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\Classification::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\StatementClassifier::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\ConflictClause::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\Identifiers::class)]
-#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\InsertSource::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\TargetTableParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Dml\Update\UpdateClauseParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Dml\Delete\DeleteClauseParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Dml\Insert\InsertClauseParser::class)]
+#[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Dml\Insert\InsertClauseParser::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\SelectColumns::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Statement\TableDefinitionClauses::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\Transaction\KeywordForm::class)]

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace ZtdQuery\Platform\Postgres\Connection\Placeholder;
+namespace ZtdQuery\Platform\Postgres\Connection\Parameter;
 
 /**
  * Tracks PostgreSQL operands and operators when escaping question marks for PDO.

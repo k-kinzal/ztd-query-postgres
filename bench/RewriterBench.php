@@ -19,6 +19,9 @@ use ZtdQuery\Schema\TableDefinition;
 use ZtdQuery\Schema\TableDefinitionRegistry;
 use ZtdQuery\Shadow\ShadowStore;
 
+/**
+ * Measures PostgreSQL SELECT and INSERT rewriting against a registered schema.
+ */
 final class RewriterBench
 {
     private PgSqlRewriter $rewriter;
@@ -27,6 +30,9 @@ final class RewriterBench
 
     private string $insertSql = "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')";
 
+    /**
+     * Builds the PostgreSQL rewriter with an empty shadow store and a users schema.
+     */
     public function setUp(): void
     {
         $store = new ShadowStore();
@@ -67,6 +73,9 @@ final class RewriterBench
         );
     }
 
+    /**
+     * Rewrites a SELECT query against the registered users table.
+     */
     #[Bench\BeforeMethods('setUp')]
     #[Bench\Revs(100)]
     public function benchRewriteSelect(): void
@@ -74,6 +83,9 @@ final class RewriterBench
         $this->rewriter->rewrite($this->selectSql);
     }
 
+    /**
+     * Rewrites an INSERT query into a result SELECT query.
+     */
     #[Bench\BeforeMethods('setUp')]
     #[Bench\Revs(100)]
     public function benchRewriteInsert(): void

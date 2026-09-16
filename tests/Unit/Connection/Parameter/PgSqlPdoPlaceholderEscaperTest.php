@@ -2,19 +2,19 @@
 
 declare(strict_types=1);
 
-namespace Tests\Unit\Connection\Placeholder;
+namespace Tests\Unit\Connection\Parameter;
 
 use Generator;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use ZtdQuery\Platform\Postgres\Connection\Placeholder\PgSqlPdoPlaceholderEscaper;
+use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoPlaceholderEscaper;
 
 #[CoversClass(PgSqlPdoPlaceholderEscaper::class)]
-#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\EscapeCursor::class)]
-#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\OperandInput::class)]
-#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\QuotedInput::class)]
-#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Placeholder\TokenBoundary::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\EscapeCursor::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\OperandInput::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\QuotedInput::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Connection\Parameter\TokenBoundary::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Lexing\CommentSpan::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Lexing\QuotedSpan::class)]
 final class PgSqlPdoPlaceholderEscaperTest extends TestCase

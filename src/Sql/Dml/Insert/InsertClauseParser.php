@@ -2,17 +2,32 @@
 
 declare(strict_types=1);
 
-namespace ZtdQuery\Platform\Postgres\Sql\Statement;
+namespace ZtdQuery\Platform\Postgres\Sql\Dml\Insert;
 
 use ZtdQuery\Platform\Postgres\Sql\PostgreSqlLexicalMasker;
 
 /**
- * Insert source operations for PostgreSQL statement.
+ * Extracts PostgreSQL INSERT columns, values and query sources.
  *
  * @visibility root
  */
-final class InsertSource
+final class InsertClauseParser
 {
+    /**
+     * Extract column list from INSERT statement.
+     *
+     * @return list<string>
+     */
+    public function extractInsertColumns(string $sql): array
+    {
+        $sql = PostgreSqlLexicalMasker::maskComments($sql);
+        if (preg_match('/INSERT\s+INTO\s+(?:ONLY\s+)?(?:"[^"]+"|[a-zA-Z_]\w*(?:\."[^"]+"|\.(?:[a-zA-Z_]\w*))?)\s*\(([^)]+)\)\s*(?:VALUES|SELECT|DEFAULT)/i', $sql, $m) === 1) {
+            return (new \ZtdQuery\Platform\Postgres\Sql\Lexing\IdentifierDecoder())->parseColumnList($m[1]);
+        }
+
+        return [];
+    }
+
     /**
      * @return array{keyword: string, offset: int}|null
      */
@@ -185,6 +200,7 @@ final class InsertSource
 
         return null;
     }
+
     /**
      * Appends a value character, treating array brackets as comma nesting.
      * @param list<string> $items

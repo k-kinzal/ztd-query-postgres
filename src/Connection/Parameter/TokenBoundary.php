@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace ZtdQuery\Platform\Postgres\Connection\Placeholder;
+namespace ZtdQuery\Platform\Postgres\Connection\Parameter;
 
 /**
  * Recognizes ASCII token boundaries and operand-expecting keywords for PDO.
