@@ -7,7 +7,7 @@ namespace Fuzz\Input;
 use SqlFaker\Generation\Choice\BytePlanCompiler;
 use SqlFaker\Generation\Choice\PlanBuilder;
 use SqlFaker\Generation\Plan\GenerationPlan;
-use SqlFaker\PostgreSqlProvider;
+use SqlFaker\PostgreSql\PostgreSqlProvider;
 
 /**
  * Freezes every structural, lexical and budget decision from corpus bytes.

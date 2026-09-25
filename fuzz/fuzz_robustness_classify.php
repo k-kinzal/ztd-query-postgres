@@ -5,7 +5,7 @@ declare(strict_types=1);
 use Faker\Factory;
 use Fuzz\Input\SqlInput;
 use SqlFaker\Generation\Coverage\GrammarCoverage;
-use SqlFaker\PostgreSqlProvider;
+use SqlFaker\PostgreSql\PostgreSqlProvider;
 use ZtdQuery\Platform\Postgres\Rewrite\PgSqlQueryGuard;
 use ZtdQuery\Platform\Postgres\Sql\PgSqlParser;
 

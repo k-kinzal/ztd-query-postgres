@@ -6,7 +6,7 @@ use Faker\Factory;
 use Fuzz\Input\SqlInput;
 use Fuzz\RewriteCheck;
 use SqlFaker\Generation\Coverage\GrammarCoverage;
-use SqlFaker\PostgreSqlProvider;
+use SqlFaker\PostgreSql\PostgreSqlProvider;
 
 register_shutdown_function(static function (): void {
     if (function_exists('pcntl_alarm')) {

@@ -9,7 +9,7 @@ use Override;
 use PHPUnit\Framework\Attributes\CoversNothing;
 use PHPUnit\Framework\Attributes\Large;
 use PHPUnit\Framework\TestCase;
-use SqlFaker\PostgreSqlProvider;
+use SqlFaker\PostgreSql\PostgreSqlProvider;
 use ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser;
 use ZtdQuery\Schema\TableDefinition;
 
