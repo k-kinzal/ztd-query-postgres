@@ -236,13 +236,13 @@ final class PgSqlMutationResolverTest extends TestCase
         ));
         $shadowStore->set('users', [['id' => 1, 'name' => 'Existing']]);
         $mutation = $resolver->resolve(
-            "INSERT INTO users (id, name) VALUES (1, 'Alice')",
+            "INSERT INTO users (id, name) VALUES (2, 'Inserted')",
             'INSERT',
             QueryKind::WRITE_SIMULATED
         );
 
         self::assertInstanceOf(InsertMutation::class, $mutation);
-        $mutation->apply($shadowStore, [['id' => 1, 'name' => 'Inserted']]);
+        $mutation->apply($shadowStore, [['id' => 2, 'name' => 'Inserted']]);
         self::assertCount(2, $shadowStore->get('users'));
     }
 

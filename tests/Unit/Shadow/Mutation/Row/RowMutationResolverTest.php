@@ -160,4 +160,40 @@ final class RowMutationResolverTest extends TestCase
         $mutation->apply($store, [['id' => 1, 'name' => 'incoming']]);
         self::assertSame([['id' => 1, 'name' => 'after']], $store->get('users'));
     }
+    public function testResolvePlainInsertRejectsDuplicateKeysAtomically(): void
+    {
+        $registry = new \ZtdQuery\Schema\TableDefinitionRegistry();
+        $registry->register('users', new \ZtdQuery\Schema\TableDefinition(['id', 'name'], ['id' => 'INTEGER', 'name' => 'TEXT'], ['id'], ['id', 'name'], []));
+        $store = new \ZtdQuery\Shadow\ShadowStore();
+        $before = [['id' => 1, 'name' => 'existing']];
+        $store->set('users', $before);
+        $sql = "INSERT INTO users (id, name) VALUES (2, 'new'), (1, 'duplicate')";
+        $resolver = new \ZtdQuery\Platform\Postgres\Shadow\Mutation\Row\RowMutationResolver(new \ZtdQuery\Platform\Postgres\Sql\PgSqlParser(), $registry, $store);
+        $mutation = $resolver->resolveInsert($sql);
+        $this->expectException(\ZtdQuery\Exception\DuplicateKeyException::class);
+        try {
+            $mutation->apply($store, [['id' => 2, 'name' => 'new'], ['id' => 1, 'name' => 'duplicate']]);
+        } finally {
+            self::assertSame($before, $store->get('users'));
+        }
+    }
+
+    public function testResolvePlainInsertRejectsNullViolationsAtomically(): void
+    {
+        $registry = new \ZtdQuery\Schema\TableDefinitionRegistry();
+        $registry->register('users', new \ZtdQuery\Schema\TableDefinition(['id', 'name'], ['id' => 'INTEGER', 'name' => 'TEXT'], ['id'], ['id', 'name'], []));
+        $store = new \ZtdQuery\Shadow\ShadowStore();
+        $before = [['id' => 1, 'name' => 'existing']];
+        $store->set('users', $before);
+        $sql = "INSERT INTO users (id, name) VALUES (2, 'new'), (1, 'duplicate')";
+        $resolver = new \ZtdQuery\Platform\Postgres\Shadow\Mutation\Row\RowMutationResolver(new \ZtdQuery\Platform\Postgres\Sql\PgSqlParser(), $registry, $store);
+        $mutation = $resolver->resolvePlainInsert($sql, 'users', ['id'], $registry->get('users'));
+        $this->expectException(\ZtdQuery\Exception\NotNullViolationException::class);
+        try {
+            $mutation->apply($store, [['id' => 2, 'name' => 'new'], ['id' => 3, 'name' => null]]);
+        } finally {
+            self::assertSame($before, $store->get('users'));
+        }
+    }
+
 }

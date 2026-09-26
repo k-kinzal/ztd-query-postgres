@@ -23,7 +23,9 @@
     "phpstan/phpstan": "^2.1",
     "phpstan/phpstan-strict-rules": "^2.0",
     "phpunit/phpunit": "^10.5",
-    "squizlabs/php_codesniffer": "^4.0.4"
+    "squizlabs/php_codesniffer": "^4.0.4",
+    "ext-pdo": "*",
+    "k-kinzal/testcontainers-php": "^0.5.1"
   },
   "repositories": [
     {
@@ -44,7 +46,8 @@
     "psr-4": {
       "Tests\\": "tests/",
       "Fuzz\\": "fuzz/",
-      "Bench\\": "bench/"
+      "Bench\\": "bench/",
+      "Container\\": "container/"
     }
   },
   "scripts": {
@@ -68,26 +71,21 @@
     "format": "php-cs-fixer fix --allow-risky=yes",
     "format:check": "php-cs-fixer fix --dry-run --diff --allow-risky=yes",
     "fuzz": "@fuzz:smoke",
-    "fuzz:robustness": [
+    "fuzz:behavior": [
       "Composer\\Config::disableProcessTimeout",
-      "@php -r \"is_dir('fuzz/corpus/robustness') || mkdir('fuzz/corpus/robustness', 0777, true);\" --",
-      "php-fuzzer fuzz fuzz/fuzz_robustness.php fuzz/corpus/robustness/"
+      "@php -r \"is_dir('fuzz/corpus/behavior') || mkdir('fuzz/corpus/behavior', 0777, true);\" --",
+      "@php -d memory_limit=-1 vendor/bin/php-fuzzer fuzz fuzz/fuzz_behavior.php fuzz/corpus/behavior/ --timeout=60"
     ],
-    "fuzz:robustness:classify": [
+    "fuzz:fixtures": [
       "Composer\\Config::disableProcessTimeout",
-      "@php -r \"is_dir('fuzz/corpus/robustness-classify') || mkdir('fuzz/corpus/robustness-classify', 0777, true);\" --",
-      "php-fuzzer fuzz fuzz/fuzz_robustness_classify.php fuzz/corpus/robustness-classify/"
-    ],
-    "fuzz:robustness:rewrite": [
-      "Composer\\Config::disableProcessTimeout",
-      "@php -r \"is_dir('fuzz/corpus/robustness-rewrite') || mkdir('fuzz/corpus/robustness-rewrite', 0777, true);\" --",
-      "php-fuzzer fuzz fuzz/fuzz_robustness_rewrite.php fuzz/corpus/robustness-rewrite/"
+      "@putenv ZTD_FUZZ_FIXTURES=1",
+      "@php -r \"is_dir('fuzz/corpus/fixtures') || mkdir('fuzz/corpus/fixtures', 0777, true);\" --",
+      "@php -d memory_limit=-1 vendor/bin/php-fuzzer fuzz fuzz/fuzz_behavior.php fuzz/corpus/fixtures/ --timeout=60"
     ],
     "fuzz:smoke": [
       "Composer\\Config::disableProcessTimeout",
-      "@fuzz:robustness --max-runs=100",
-      "@fuzz:robustness:classify --max-runs=100",
-      "@fuzz:robustness:rewrite --max-runs=100"
+      "@fuzz:behavior --max-runs=100",
+      "@fuzz:fixtures --max-runs=100"
     ],
     "lint": [
       "@autoload:check",
@@ -99,10 +97,9 @@
       "@deptrac"
     ],
     "loc-guard": "loc-guard --config=loc.yaml",
-    "phpstan": "phpstan analyse --memory-limit=512M",
+    "phpstan": "phpstan analyse --memory-limit=1G",
     "test": "paratest --processes=auto",
     "test:coverage": "@php -d memory_limit=1G vendor/bin/paratest --processes=auto --testsuite unit --coverage-xml build/coverage-xml --log-junit build/junit.xml",
-    "test:fuzz": "phpunit fuzz/",
     "test:unit": "phpunit --testsuite unit",
     "tree-guard": "tree-guard --config=tree.yaml"
   },
@@ -127,7 +124,6 @@
     "phpstan": "Run PHPStan.",
     "test": "Run all test suites in parallel.",
     "test:coverage": "Run the unit tests in parallel and write the coverage and JUnit reports to build/.",
-    "test:fuzz": "Run the PHPUnit tests under fuzz/.",
     "test:unit": "Run the unit tests.",
     "tree-guard": "Check the directory structure rules."
   },

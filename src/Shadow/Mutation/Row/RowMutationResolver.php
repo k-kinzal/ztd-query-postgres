@@ -89,10 +89,23 @@ final class RowMutationResolver
             );
         }
 
+        return $this->resolvePlainInsert($sql, $storageTable, $primaryKeys, $definition);
+    }
+
+    /**
+     * Preserve the reflected constraints when resolving an ordinary INSERT.
+     *
+     * @param list<string> $primaryKeys
+     */
+    public function resolvePlainInsert(string $sql, string $storageTable, array $primaryKeys, ?\ZtdQuery\Schema\TableDefinition $definition): ShadowMutation
+    {
         return new InsertMutation(
             $storageTable,
             $primaryKeys,
             false,
+            tableDefinition: $definition,
+            sql: $sql,
+            validateConstraints: true,
             candidateKeys: $definition?->candidateKeys(),
         );
     }
