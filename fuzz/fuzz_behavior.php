@@ -13,6 +13,7 @@
 
 declare(strict_types=1);
 
+use Container\Endpoint;
 use Container\PostgreSql17Container;
 use Faker\Factory;
 use Fuzz\Target\BehaviorTarget;
@@ -33,10 +34,8 @@ register_shutdown_function(static function (): void {
         pcntl_alarm(0);
     }
 });
-$instance = Testcontainers::run(PostgreSql17Container::class);
-$host = str_replace('localhost', '127.0.0.1', $instance->getHost());
-$port = $instance->getMappedPort(5432);
-$target = new BehaviorTarget("pgsql:host={$host};port={$port};dbname=test");
+$endpoint = Testcontainers::run(PostgreSql17Container::class)->getData(Endpoint::class);
+$target = new BehaviorTarget($endpoint->dsn());
 
 $fixtures = getenv('ZTD_FUZZ_FIXTURES') === '1';
 $coverage = getenv('SQLFAKER_COVERAGE') === '0' ? null : new GrammarCoverage(__DIR__ . '/coverage/' . ($fixtures ? 'fixtures' : 'behavior'));
