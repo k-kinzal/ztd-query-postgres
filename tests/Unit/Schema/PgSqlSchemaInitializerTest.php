@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace Tests\Unit\Session;
+namespace Tests\Unit\Schema;
 
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
-#[CoversClass(\ZtdQuery\Platform\Postgres\Session\SchemaInitializer::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaInitializer::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Relation\FromClause::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Relation\RelationReference::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Schema\PgSqlColumnTypeMapper::class)]
@@ -40,7 +40,7 @@ use PHPUnit\Framework\TestCase;
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Partition\BoundPredicate::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Partition\ClauseTokens::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\ZtdQuery\Platform\Postgres\Sql\Lexing\QuotedSpan::class)]
-final class SchemaInitializerTest extends TestCase
+final class PgSqlSchemaInitializerTest extends TestCase
 {
     public function testPopulateRegistersColumnsPartialIndexesAndPartitionKeys(): void
     {
@@ -64,7 +64,7 @@ final class SchemaInitializerTest extends TestCase
             return array_shift($statementResults) ?? false;
         });
         $registry = new \ZtdQuery\Schema\TableDefinitionRegistry();
-        (new \ZtdQuery\Platform\Postgres\Session\SchemaInitializer())->populate($connection, new \ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaReflector($connection), new \ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser(), $registry);
+        (new \ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaInitializer())->populate($connection, new \ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaReflector($connection), new \ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser(), $registry);
         $definition = $registry->get('users');
         self::assertNotNull($definition);
         self::assertSame(['id'], $definition->primaryKeys);

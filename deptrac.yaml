@@ -11,11 +11,9 @@ deptrac:
     - name: Session
       collectors:
         - type: directory
-          value: src/PgSqlSessionFactory.php$
+          value: src/PgSqlPlatform.php$
         - type: directory
           value: src/Compatibility/.*
-        - type: directory
-          value: src/Session/.*
     - name: Simulation
       collectors:
         - type: directory
@@ -37,7 +35,7 @@ deptrac:
     - name: CoreSession
       collectors:
         - type: classLike
-          value: ^ZtdQuery\\(?:[^\\]+|Platform\\SessionFactory)$
+          value: ^ZtdQuery\\[^\\]+$
     - name: CoreSimulation
       collectors:
         - type: classLike
@@ -45,7 +43,7 @@ deptrac:
     - name: CoreContract
       collectors:
         - type: classLike
-          value: ^ZtdQuery\\Platform\\(?!SessionFactory$)[^\\]+$
+          value: ^ZtdQuery\\Platform\\[^\\]+$
     - name: CoreConnection
       collectors:
         - type: classLike
@@ -77,6 +75,7 @@ deptrac:
       - Schema
       - Sql
       - CoreSession
+      - CoreContract
       - CoreSimulation
       - CoreConnection
       - CoreSchema

@@ -2,21 +2,18 @@
 
 declare(strict_types=1);
 
-namespace ZtdQuery\Platform\Postgres\Session;
+namespace ZtdQuery\Platform\Postgres\Schema;
 
 use ZtdQuery\Connection\ConnectionInterface;
 use ZtdQuery\Platform\Postgres\Schema\Partition\PgSqlPartitionReflector;
-use ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaParser;
-use ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaReflector;
 use ZtdQuery\Schema\TableDefinitionRegistry;
-use ZtdQuery\Session;
 
 /**
- * Registers reflected PostgreSQL metadata before a session accepts queries.
+ * Registers reflected PostgreSQL metadata for the PostgreSQL platform.
  *
  * @visibility root
  */
-final class SchemaInitializer
+final class PgSqlSchemaInitializer
 {
     /**
      * Loads table definitions, partial indexes and partition relationships in reflection order.

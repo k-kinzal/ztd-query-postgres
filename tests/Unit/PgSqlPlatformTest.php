@@ -14,7 +14,7 @@ use ZtdQuery\Platform\Postgres\Connection\Copy\PgSqlCopySupport;
 use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoParameterBindingCompiler;
 use ZtdQuery\Platform\Postgres\Connection\Parameter\PgSqlPdoPlaceholderEscaper;
 use ZtdQuery\Platform\Postgres\Connection\Result\PgSqlPdoResultColumnTypeResolver;
-use ZtdQuery\Platform\Postgres\PgSqlSessionFactory;
+use ZtdQuery\Platform\Postgres\PgSqlPlatform;
 use ZtdQuery\Platform\Postgres\Rewrite\PgSqlQueryGuard;
 use ZtdQuery\Platform\Postgres\Rewrite\PgSqlRewriter;
 use ZtdQuery\Platform\Postgres\Rewrite\Transformer\DeleteTransformer;
@@ -31,7 +31,7 @@ use ZtdQuery\Platform\Postgres\Sql\PgSqlIdentifierQuoter;
 use ZtdQuery\Platform\Postgres\Sql\PgSqlParser;
 use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
 
-#[CoversClass(PgSqlSessionFactory::class)]
+#[CoversClass(PgSqlPlatform::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Schema\PgSqlColumnTypeMapper::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Schema\Key\PgSqlForeignKeyDefinitionParser::class)]
 #[UsesClass(PgSqlParser::class)]
@@ -71,7 +71,7 @@ use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
 #[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Returning\PgSqlReturningProjectionParser::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Shadow\Mutation\Upsert\PgSqlUpsertExpressionParser::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Sql\PgSqlLexerProfile::class)]
-#[CoversClass(\ZtdQuery\Platform\Postgres\Session\SchemaInitializer::class)]
+#[CoversClass(\ZtdQuery\Platform\Postgres\Schema\PgSqlSchemaInitializer::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Copy\TargetColumns::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Copy\TargetSql::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Connection\Copy\TextFields::class)]
@@ -162,9 +162,9 @@ use ZtdQuery\Platform\Postgres\Sql\Value\PgSqlCastRenderer;
 #[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Transformer\Merge\MatchConditions::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Transformer\Merge\RowActions::class)]
 #[UsesClass(\ZtdQuery\Platform\Postgres\Rewrite\Transformer\Update\ColumnProjection::class)]
-final class PgSqlSessionFactoryTest extends TestCase
+final class PgSqlPlatformTest extends TestCase
 {
-    public function testCreateRegistersReflectedPartitionMetadata(): void
+    public function testReflectSchemaRegistersReflectedPartitionMetadata(): void
     {
         $tables = self::createStub(StatementInterface::class);
         $tables->method('fetchAll')->willReturn([['table_name' => 'logs'], ['table_name' => 'logs_2024']]);
@@ -189,14 +189,14 @@ final class PgSqlSessionFactoryTest extends TestCase
                 default => $empty,
             };
         });
-        $session = (new PgSqlSessionFactory())->create($connection, ZtdConfig::default());
-        $sql = $session->rewrite('SELECT * FROM logs_2024')->sql();
+        $executor = new \ZtdQuery\QueryExecutor($connection, new PgSqlPlatform(), ZtdConfig::default());
+        $sql = $executor->rewrite('SELECT * FROM logs_2024')->sql();
         self::assertStringContainsString('"logs" AS MATERIALIZED', $sql);
         self::assertStringContainsString('"logs_2024" AS MATERIALIZED (SELECT * FROM "logs" WHERE log_date >=', $sql);
-        $create = $session->rewrite("CREATE TABLE logs_2025 PARTITION OF logs FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')");
+        $create = $executor->rewrite("CREATE TABLE logs_2025 PARTITION OF logs FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')");
         self::assertNotNull($create->mutation());
     }
-    public function testCreateRegistersReflectedViews(): void
+    public function testReflectViewsRegistersReflectedViews(): void
     {
         $empty = self::createStub(StatementInterface::class);
         $empty->method('fetchAll')->willReturn([]);
@@ -204,21 +204,21 @@ final class PgSqlSessionFactoryTest extends TestCase
         $views->method('fetchAll')->willReturn([['viewname' => 'active_users', 'definition' => 'SELECT 1 AS id']]);
         $connection = self::createStub(ConnectionInterface::class);
         $connection->method('query')->willReturnCallback(static fn (string $sql): StatementInterface => str_contains($sql, 'pg_views') ? $views : $empty);
-        $session = (new PgSqlSessionFactory())->create($connection, ZtdConfig::default());
-        self::assertSame("WITH \"active_users\" AS MATERIALIZED (SELECT 1 AS id)\nSELECT * FROM active_users", $session->rewrite('SELECT * FROM active_users')->sql());
+        $executor = new \ZtdQuery\QueryExecutor($connection, new PgSqlPlatform(), ZtdConfig::default());
+        self::assertSame("WITH \"active_users\" AS MATERIALIZED (SELECT 1 AS id)\nSELECT * FROM active_users", $executor->rewrite('SELECT * FROM active_users')->sql());
     }
-    public function testCreateReturnsSession(): void
+    public function testCreateRewriterProvidesIndependentSqlBehavior(): void
     {
         $connection = static::createStub(ConnectionInterface::class);
         $tablesStmt = static::createStub(StatementInterface::class);
         $tablesStmt->method('fetchAll')->willReturn([]);
         $connection->method('query')->willReturn($tablesStmt);
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        self::assertTrue($session->isEnabled());
-        self::assertInstanceOf(PgSqlCopySupport::class, $session->copySupport());
-        self::assertInstanceOf(PgSqlPdoParameterBindingCompiler::class, $session->parameterBindingCompiler());
-        self::assertInstanceOf(PgSqlPdoResultColumnTypeResolver::class, $session->resultColumnTypeResolver());
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        self::assertTrue($executor->session()->isEnabled());
+        self::assertInstanceOf(PgSqlCopySupport::class, $executor->platform()->copySupport());
+        self::assertInstanceOf(PgSqlPdoParameterBindingCompiler::class, $executor->platform()->parameterBindingCompiler());
+        self::assertInstanceOf(PgSqlPdoResultColumnTypeResolver::class, $executor->platform()->resultColumnTypeResolver());
     }
     public function testCreatedSessionIsEnabledByDefault(): void
     {
@@ -226,9 +226,9 @@ final class PgSqlSessionFactoryTest extends TestCase
         $tablesStmt = static::createStub(StatementInterface::class);
         $tablesStmt->method('fetchAll')->willReturn([]);
         $connection->method('query')->willReturn($tablesStmt);
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        self::assertTrue($session->isEnabled());
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        self::assertTrue($executor->session()->isEnabled());
     }
     public function testCreateWithTablesReflectsSchema(): void
     {
@@ -256,17 +256,17 @@ final class PgSqlSessionFactoryTest extends TestCase
             }
             return false;
         });
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        self::assertTrue($session->isEnabled());
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        self::assertTrue($executor->session()->isEnabled());
     }
     public function testCreateWithEmptyDatabaseReturnsSession(): void
     {
         $connection = static::createStub(ConnectionInterface::class);
         $connection->method('query')->willReturn(false);
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        self::assertTrue($session->isEnabled());
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        self::assertTrue($executor->session()->isEnabled());
     }
     public function testSessionCanBeEnabledAfterCreation(): void
     {
@@ -274,10 +274,10 @@ final class PgSqlSessionFactoryTest extends TestCase
         $tablesStmt = static::createStub(StatementInterface::class);
         $tablesStmt->method('fetchAll')->willReturn([]);
         $connection->method('query')->willReturn($tablesStmt);
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        $session->enable();
-        self::assertTrue($session->isEnabled());
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        $executor->session()->enable();
+        self::assertTrue($executor->session()->isEnabled());
     }
     public function testCreateWithTableRegistersSchemaInSession(): void
     {
@@ -305,10 +305,10 @@ final class PgSqlSessionFactoryTest extends TestCase
             }
             return false;
         });
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        $session->enable();
-        $plan = $session->rewrite('SELECT * FROM products');
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        $executor->session()->enable();
+        $plan = $executor->rewrite('SELECT * FROM products');
         self::assertStringContainsString('"products" AS MATERIALIZED', $plan->sql());
     }
     public function testCreateWithNullParseResultStillWorks(): void
@@ -324,9 +324,9 @@ final class PgSqlSessionFactoryTest extends TestCase
             }
             return $columnsStmt;
         });
-        $factory = new PgSqlSessionFactory();
-        $session = $factory->create($connection, ZtdConfig::default());
-        self::assertTrue($session->isEnabled());
+        $platform = new PgSqlPlatform();
+        $executor = new \ZtdQuery\QueryExecutor($connection, $platform, ZtdConfig::default());
+        self::assertTrue($executor->session()->isEnabled());
     }
     public function testCreateRegistersReflectedPartialUniqueIndexes(): void
     {
@@ -350,9 +350,24 @@ final class PgSqlSessionFactoryTest extends TestCase
                 default => $empty,
             };
         });
-        $session = (new PgSqlSessionFactory())->create($connection, ZtdConfig::default());
-        $plan = $session->rewrite("INSERT INTO users (id, email, status) VALUES (1, 'a@example.com', 'active') " . "ON CONFLICT (email) WHERE status = 'active' " . 'DO UPDATE SET status = EXCLUDED.status');
+        $executor = new \ZtdQuery\QueryExecutor($connection, new PgSqlPlatform(), ZtdConfig::default());
+        $plan = $executor->rewrite("INSERT INTO users (id, email, status) VALUES (1, 'a@example.com', 'active') " . "ON CONFLICT (email) WHERE status = 'active' " . 'DO UPDATE SET status = EXCLUDED.status');
         self::assertStringContainsString('"__ztd_existing"."email" = "__ztd_incoming"."email"', $plan->sql());
         self::assertStringContainsString('"__ztd_existing"."status" = \'active\'', $plan->sql());
+    }
+
+    public function testCopySupportDescribesTheDialect(): void
+    {
+        self::assertInstanceOf(PgSqlCopySupport::class, (new PgSqlPlatform())->copySupport());
+    }
+
+    public function testParameterBindingCompilerDescribesTheDialect(): void
+    {
+        self::assertInstanceOf(PgSqlPdoParameterBindingCompiler::class, (new PgSqlPlatform())->parameterBindingCompiler());
+    }
+
+    public function testResultColumnTypeResolverDescribesTheDialect(): void
+    {
+        self::assertInstanceOf(PgSqlPdoResultColumnTypeResolver::class, (new PgSqlPlatform())->resultColumnTypeResolver());
     }
 }

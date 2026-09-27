@@ -19,13 +19,13 @@ use ZtdQuery\Connection\StatementInterface;
 use ZtdQuery\Exception\DuplicateKeyException;
 use ZtdQuery\Exception\NotNullViolationException;
 use ZtdQuery\Exception\UnknownSchemaException;
-use ZtdQuery\Platform\Postgres\PgSqlSessionFactory;
+use ZtdQuery\Platform\Postgres\PgSqlPlatform;
 use ZtdQuery\Platform\ResultColumnTypeResolver;
+use ZtdQuery\QueryExecutor;
 use ZtdQuery\Rewrite\QueryKind;
-use ZtdQuery\Session;
 
 /**
- * Compares native SQL with the platform session, independently of production adapters.
+ * Compares native SQL with core QueryExecutor plus Platform, independently of adapters.
  * Checks rows (including multiplicity and NULL), affected counts, rejection reasons,
  * subsequent table reads, and physical isolation, including on rejected statements.
  * Unordered row bags are compared; result ordering is outside this target's contract.
@@ -36,7 +36,6 @@ final class BehaviorTarget implements ConnectionInterface
 
     /**
      * Connect only to the disposable server owned by the entrypoint.
-
      */
     public function __construct(private readonly string $dsn)
     {
@@ -44,7 +43,6 @@ final class BehaviorTarget implements ConnectionInterface
 
     /**
      * Reset a private schema, executing generated SQL without superuser privileges.
-
      */
     public function database(string $side): PDO
     {
@@ -101,10 +99,10 @@ final class BehaviorTarget implements ConnectionInterface
         $before = $this->snapshot($this->physical);
         $context = 'Input (hex): ' . bin2hex($input) . "\nSQL: {$sql}";
         try {
-            $session = (new PgSqlSessionFactory())->create($this, new ZtdConfig(UnsupportedSqlBehavior::Exception, UnknownSchemaBehavior::Exception));
-            $this->execute($session, $fixtures);
+            $executor = new QueryExecutor($this, new PgSqlPlatform(), new ZtdConfig(UnsupportedSqlBehavior::Exception, UnknownSchemaBehavior::Exception));
+            $this->execute($executor, $fixtures);
             $this->physical->exec('UPDATE items SET value = value WHERE 0 = 1');
-            $actual = $this->virtual($session, $sql);
+            $actual = $this->virtual($executor, $sql);
             if (!$stable) {
                 return;
             }
@@ -112,10 +110,10 @@ final class BehaviorTarget implements ConnectionInterface
                 throw new Error($context . "\nNative and ZTD outcomes differ.\nExpected: " . var_export($expected, true) . "\nActual: " . var_export($actual, true));
             }
             foreach (array_unique(['items', ...array_keys($state)]) as $table) {
-                $definition = $session->tableDefinition($table);
+                $definition = $executor->session()->tableDefinition($table);
                 $observed = $definition === null ? null : [
                     'columns' => $definition->columns,
-                    'rows' => $this->virtual($session, 'SELECT * FROM ' . $this->quote($table)),
+                    'rows' => $this->virtual($executor, 'SELECT * FROM ' . $this->quote($table)),
                 ];
                 if (($state[$table] ?? null) !== $observed) {
                     throw new Error($context . "\nVirtual table differs after the statement: " . $table . "\nExpected: " . var_export($state[$table] ?? null, true) . "\nActual: " . var_export($observed, true));
@@ -136,18 +134,18 @@ final class BehaviorTarget implements ConnectionInterface
      * @throws DatabaseException When ZTD rejects a statement
      * @throws Error When ZTD silently skips a statement
      */
-    public function execute(Session $session, string $sql): array
+    public function execute(QueryExecutor $executor, string $sql): array
     {
-        $transaction = $session->transactionStatement($sql);
+        $transaction = $executor->transactionStatement($sql);
         if ($transaction !== null) {
-            $session->applyTransactionStatement($transaction);
+            $executor->session()->applyTransactionStatement($transaction);
             return ['ok', 0];
         }
-        $plan = $session->rewrite($sql);
+        $plan = $executor->rewrite($sql);
         if ($plan->kind() === QueryKind::SKIPPED) {
             throw new Error('ZTD silently skipped: ' . $sql);
         }
-        $result = $session->processExecutedStatement($plan, $this->query($plan->sql()));
+        $result = $executor->processExecutedStatement($plan, $this->query($plan->sql()));
         return ['ok', $result->hasResultSet() ? $this->rows($result->fetchAll()) : $result->rowCount()];
     }
 
@@ -156,10 +154,10 @@ final class BehaviorTarget implements ConnectionInterface
      * @return array<mixed>
      * @throws Error When the session silently skips SQL
      */
-    public function virtual(Session $session, string $sql): array
+    public function virtual(QueryExecutor $executor, string $sql): array
     {
         try {
-            return $this->execute($session, $sql);
+            return $this->execute($executor, $sql);
         } catch (PDOException|DatabaseException $failure) {
             return ['error', $this->rejection($failure)];
         }
@@ -294,7 +292,6 @@ final class BehaviorTarget implements ConnectionInterface
 
     /**
      * Quote catalog identifiers without interpreting generated SQL.
-
      */
     public function quote(string $name): string
     {
@@ -322,7 +319,6 @@ final class BehaviorTarget implements ConnectionInterface
 
             /**
              * Execute the native statement.
-
              */
             public function execute(?array $params = null): bool
             {
@@ -368,7 +364,6 @@ final class BehaviorTarget implements ConnectionInterface
 
             /**
              * Return the native affected count.
-
              */
             public function rowCount(): int
             {
