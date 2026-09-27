@@ -35,6 +35,18 @@ abstract class PostgreSqlContainer extends GenericContainer
     protected static $AUTO_REMOVE_ON_EXIT = true;
 
     /**
+     * Returns the SQL grammar identifier matching the server version.
+     *
+     * @return string Grammar identifier, `pg-` followed by the image tag.
+     */
+    public static function getGrammarVersion(): string
+    {
+        $image = (string) static::$IMAGE;
+
+        return 'pg-' . substr($image, (int) strrpos($image, ':') + 1);
+    }
+
+    /**
      * Attaches the server endpoint once the container has started.
      *
      * The host is given as `127.0.0.1` instead of `localhost` so that clients connect over TCP.
